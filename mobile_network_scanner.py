@@ -23,7 +23,7 @@ import ipaddress
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-DEFAULT_PORTS = (80, 443, 22, 445, 139, 8080, 8443, 62078)
+DEFAULT_PORTS = (80, 443, 22, 445, 139, 8080, 8443, 62078, 3389, 5000, 7000)
 
 
 def get_local_subnet() -> str:
