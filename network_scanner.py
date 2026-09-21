@@ -7,8 +7,13 @@ table when scapy isn't installed or the process lacks the privileges
 ARP scanning requires.
 
 Usage:
-    python network_scanner.py                 # auto-detect local subnet
-    python network_scanner.py 192.168.1.0/24   # scan a specific subnet
+    python network_scanner.py                     # auto-detect local subnet
+    python network_scanner.py 192.168.1.0/24       # scan a specific subnet
+    python network_scanner.py 192.168.1.0/24,10.0.0.0/24  # scan several subnets
+    python network_scanner.py --all-subnets        # scan every subnet this
+                                                    # machine has an interface
+                                                    # on (needs `pip install
+                                                    # psutil`)
     python network_scanner.py --timeout 2
 """
 
@@ -19,7 +24,7 @@ import re
 import socket
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, TypedDict
+from typing import Dict, Iterable, List, TypedDict
 
 
 class Device(TypedDict):
@@ -50,6 +55,75 @@ def get_local_subnet() -> str:
     # local_ip is a host address, not the network address itself.
     network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
     return str(network)
+
+
+def get_local_subnets() -> List[str]:
+    """Detect every local IPv4 subnet this machine has a network interface on.
+
+    get_local_subnet() only finds the one subnet reachable via the OS's
+    default route, so a machine with more than one active network (e.g.
+    Wi-Fi *and* Ethernet, or a VPN) would have every other subnet go
+    unscanned. This enumerates all interfaces instead, via the optional
+    `psutil` dependency (not in the standard library, since there's no
+    portable, dependency-free way to list interfaces/netmasks across
+    Linux/macOS/Windows).
+
+    Returns:
+        A de-duplicated, sorted list of CIDR strings, e.g.
+        ["10.8.0.0/24", "192.168.1.0/24"]. Loopback (127.0.0.0/8) and
+        link-local (169.254.0.0/16) ranges are excluded, since those
+        aren't networks other real devices live on. Falls back to a
+        single-element list from get_local_subnet() if psutil isn't
+        installed.
+    """
+    try:
+        # Imported lazily so machines without psutil installed can still
+        # use every other feature of this script - only --all-subnets
+        # needs it.
+        import psutil
+    except ImportError:
+        return [get_local_subnet()]
+
+    subnets = set()
+    # net_if_addrs() maps interface name -> list of its addresses (IPv4,
+    # IPv6, and MAC, all mixed together), so we look at every interface's
+    # every address rather than assuming one address per interface.
+    for addresses in psutil.net_if_addrs().values():
+        for addr in addresses:
+            if addr.family != socket.AF_INET or not addr.netmask:
+                # Skip IPv6/MAC entries, and any IPv4 entry missing a
+                # netmask (some virtual interfaces report one without
+                # the other).
+                continue
+            network = ipaddress.ip_network(f"{addr.address}/{addr.netmask}", strict=False)
+            if network.is_loopback or network.is_link_local:
+                continue
+            subnets.add(network)
+
+    return [str(network) for network in sorted(subnets)]
+
+
+def scan_all_subnets(subnets: Iterable[str], timeout: float) -> List[Device]:
+    """Run scan() over multiple subnets and merge the results into one list.
+
+    Args:
+        subnets: CIDR ranges to scan, e.g. from get_local_subnets().
+        timeout: Passed through to scan() for each subnet.
+
+    Returns:
+        Every discovered device across all subnets, sorted by IP and
+        de-duplicated by IP address (the same device could otherwise be
+        listed twice if, say, two scanned subnets overlap via a bridged
+        or VPN interface).
+    """
+    # Keyed by IP so a later subnet's result for the same address simply
+    # overwrites the earlier one rather than producing a duplicate row.
+    devices_by_ip: Dict[str, Device] = {}
+    for subnet in subnets:
+        for device in scan(subnet, timeout):
+            devices_by_ip[device["ip"]] = device
+
+    return sorted(devices_by_ip.values(), key=lambda d: ipaddress.ip_address(d["ip"]))
 
 
 def arp_scan(subnet: str, timeout: float) -> List[Device]:
@@ -264,16 +338,32 @@ def scan(subnet: str, timeout: float) -> List[Device]:
 def main() -> None:
     """CLI entry point: parse arguments, run the scan, and print a results table."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("subnet", nargs="?", help="Subnet to scan in CIDR notation, e.g. 192.168.1.0/24")
+    parser.add_argument(
+        "subnet",
+        nargs="?",
+        help="Subnet(s) to scan in CIDR notation, comma-separated for more than one, e.g. 192.168.1.0/24,10.0.0.0/24",
+    )
+    parser.add_argument(
+        "--all-subnets",
+        action="store_true",
+        help="Auto-detect and scan every local subnet this machine has an interface on (requires `pip install psutil`), instead of just the one on the default route",
+    )
     parser.add_argument("--timeout", type=float, default=1.0, help="Timeout in seconds per host (default: 1.0)")
     args = parser.parse_args()
 
-    # If the user didn't pass a subnet, auto-detect it from the machine's
-    # own network configuration instead of forcing them to look it up.
-    subnet: str = args.subnet or get_local_subnet()
-    print(f"Scanning {subnet} ...")
+    # Precedence: an explicit subnet argument always wins; otherwise
+    # --all-subnets scans everything psutil can see; otherwise fall back
+    # to auto-detecting just the one subnet on the default route.
+    if args.subnet:
+        subnets: List[str] = [s.strip() for s in args.subnet.split(",")]
+    elif args.all_subnets:
+        subnets = get_local_subnets()
+    else:
+        subnets = [get_local_subnet()]
 
-    devices: List[Device] = scan(subnet, args.timeout)
+    print(f"Scanning {', '.join(subnets)} ...")
+
+    devices: List[Device] = scan_all_subnets(subnets, args.timeout)
 
     if not devices:
         print("No devices found.")

@@ -1,10 +1,17 @@
 import socket
 import subprocess
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import network_scanner as ns
+
+
+def _fake_addr(family, address, netmask):
+    """Build a stand-in for the namedtuple psutil.net_if_addrs() entries."""
+    return types.SimpleNamespace(family=family, address=address, netmask=netmask)
 
 
 class TestGetLocalSubnet:
@@ -15,6 +22,84 @@ class TestGetLocalSubnet:
 
         with patch("network_scanner.socket.socket", return_value=fake_sock):
             assert ns.get_local_subnet() == "192.168.1.0/24"
+
+
+class TestGetLocalSubnets:
+    def test_falls_back_to_get_local_subnet_when_psutil_missing(self):
+        with patch.dict(sys.modules, {"psutil": None}), \
+                patch("network_scanner.get_local_subnet", return_value="192.168.1.0/24"):
+            assert ns.get_local_subnets() == ["192.168.1.0/24"]
+
+    def test_collects_subnets_from_every_interface(self):
+        fake_psutil = MagicMock()
+        fake_psutil.net_if_addrs.return_value = {
+            "en0": [_fake_addr(socket.AF_INET, "192.168.1.42", "255.255.255.0")],
+            "utun0": [_fake_addr(socket.AF_INET, "10.8.0.5", "255.255.255.0")],
+        }
+
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            assert ns.get_local_subnets() == ["10.8.0.0/24", "192.168.1.0/24"]
+
+    def test_excludes_loopback_and_link_local(self):
+        fake_psutil = MagicMock()
+        fake_psutil.net_if_addrs.return_value = {
+            "lo0": [_fake_addr(socket.AF_INET, "127.0.0.1", "255.0.0.0")],
+            "en0": [
+                _fake_addr(socket.AF_INET, "169.254.1.2", "255.255.0.0"),
+                _fake_addr(socket.AF_INET, "192.168.1.42", "255.255.255.0"),
+            ],
+        }
+
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            assert ns.get_local_subnets() == ["192.168.1.0/24"]
+
+    def test_ignores_non_ipv4_and_missing_netmask_entries(self):
+        fake_psutil = MagicMock()
+        fake_psutil.net_if_addrs.return_value = {
+            "en0": [
+                _fake_addr(socket.AF_INET6, "fe80::1", "ffff:ffff:ffff:ffff::"),
+                _fake_addr(socket.AF_INET, "192.168.1.42", None),
+                _fake_addr(socket.AF_INET, "10.0.0.5", "255.255.255.0"),
+            ],
+        }
+
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            assert ns.get_local_subnets() == ["10.0.0.0/24"]
+
+    def test_deduplicates_shared_subnets(self):
+        fake_psutil = MagicMock()
+        fake_psutil.net_if_addrs.return_value = {
+            "en0": [_fake_addr(socket.AF_INET, "192.168.1.42", "255.255.255.0")],
+            "en1": [_fake_addr(socket.AF_INET, "192.168.1.99", "255.255.255.0")],
+        }
+
+        with patch.dict(sys.modules, {"psutil": fake_psutil}):
+            assert ns.get_local_subnets() == ["192.168.1.0/24"]
+
+
+class TestScanAllSubnets:
+    def test_merges_devices_from_every_subnet(self):
+        def fake_scan(subnet, timeout):
+            return {
+                "192.168.1.0/24": [{"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}],
+                "10.0.0.0/24": [{"ip": "10.0.0.9", "mac": "", "hostname": "nas.local"}],
+            }[subnet]
+
+        with patch("network_scanner.scan", side_effect=fake_scan):
+            devices = ns.scan_all_subnets(["192.168.1.0/24", "10.0.0.0/24"], timeout=1.0)
+
+        assert [d["ip"] for d in devices] == ["10.0.0.9", "192.168.1.5"]
+
+    def test_deduplicates_by_ip_across_overlapping_subnets(self):
+        with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "", "hostname": ""}]):
+            devices = ns.scan_all_subnets(["192.168.1.0/24", "192.168.1.0/24"], timeout=1.0)
+
+        assert len(devices) == 1
+
+    def test_empty_subnet_list_returns_empty(self):
+        with patch("network_scanner.scan") as mock_scan:
+            assert ns.scan_all_subnets([], timeout=1.0) == []
+        mock_scan.assert_not_called()
 
 
 class TestPing:

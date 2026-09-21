@@ -12,9 +12,19 @@ It will not find hosts with none of the probed ports open or reachable
 (e.g. a phone with all inbound connections blocked), so it's a best-effort
 discovery method, not a guarantee of completeness the way an ARP scan is.
 
+Note on scanning multiple subnets: unlike network_scanner.py, this script
+can't auto-detect every subnet a device is attached to - listing network
+interfaces requires OS APIs (or the `psutil` package, which needs a C
+compiler to build and generally isn't available in these sandboxes) that
+iOS's sandbox doesn't expose. It also matters less here: a phone typically
+has just one active local network (Wi-Fi) at a time. If you do know of more
+than one subnet to check (e.g. your Wi-Fi range and a VPN range), pass them
+as a comma-separated list and this script will scan each of them.
+
 Usage:
-    python mobile_network_scanner.py                 # auto-detect local subnet
-    python mobile_network_scanner.py 192.168.1.0/24   # scan a specific subnet
+    python mobile_network_scanner.py                    # auto-detect local subnet
+    python mobile_network_scanner.py 192.168.1.0/24      # scan a specific subnet
+    python mobile_network_scanner.py 192.168.1.0/24,10.0.0.0/24  # scan several
     python mobile_network_scanner.py --timeout 0.5 --ports 22,80,443
 """
 
@@ -22,7 +32,7 @@ import argparse
 import ipaddress
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Iterable, List, Sequence, TypedDict
+from typing import Dict, Iterable, List, Sequence, TypedDict
 
 
 class Device(TypedDict):
@@ -153,26 +163,61 @@ def tcp_scan(
     return sorted(devices, key=lambda d: ipaddress.ip_address(d["ip"]))
 
 
+def scan_all_subnets(
+    subnets: Iterable[str],
+    timeout: float = 0.5,
+    ports: Sequence[int] = DEFAULT_PORTS,
+    max_workers: int = 100,
+) -> List[Device]:
+    """Run tcp_scan() over multiple subnets and merge the results into one list.
+
+    Args:
+        subnets: CIDR ranges to scan, e.g. ["192.168.1.0/24", "10.0.0.0/24"].
+        timeout: Passed through to tcp_scan() for each subnet.
+        ports: Passed through to tcp_scan() for each subnet.
+        max_workers: Passed through to tcp_scan() for each subnet.
+
+    Returns:
+        Every discovered device across all subnets, sorted by IP and
+        de-duplicated by IP address (the same device could otherwise be
+        listed twice if two of the given subnets overlap).
+    """
+    # Keyed by IP so a later subnet's result for the same address simply
+    # overwrites the earlier one rather than producing a duplicate row.
+    devices_by_ip: Dict[str, Device] = {}
+    for subnet in subnets:
+        for device in tcp_scan(subnet, timeout=timeout, ports=ports, max_workers=max_workers):
+            devices_by_ip[device["ip"]] = device
+
+    return sorted(devices_by_ip.values(), key=lambda d: ipaddress.ip_address(d["ip"]))
+
+
 def main() -> None:
     """CLI entry point: parse arguments, run the scan, and print a results table."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("subnet", nargs="?", help="Subnet to scan in CIDR notation, e.g. 192.168.1.0/24")
+    parser.add_argument(
+        "subnet",
+        nargs="?",
+        help="Subnet(s) to scan in CIDR notation, comma-separated for more than one, e.g. 192.168.1.0/24,10.0.0.0/24",
+    )
     parser.add_argument("--timeout", type=float, default=0.5, help="Timeout in seconds per port probe (default: 0.5)")
     parser.add_argument("--ports", type=str, default=None, help="Comma-separated TCP ports to probe (default: common ports)")
     args = parser.parse_args()
 
     # If the user didn't pass a subnet, auto-detect it from the device's
     # own network configuration instead of forcing them to look it up.
-    subnet: str = args.subnet or get_local_subnet()
+    # Multiple comma-separated subnets are supported since this sandbox
+    # can't auto-detect more than one for us (see the module docstring).
+    subnets: List[str] = [s.strip() for s in args.subnet.split(",")] if args.subnet else [get_local_subnet()]
 
     # --ports takes a comma-separated string on the command line (e.g.
     # "22,80,443"); convert it to a tuple of ints, or fall back to the
     # built-in defaults if the flag wasn't given at all.
     ports: Sequence[int] = tuple(int(p) for p in args.ports.split(",")) if args.ports else DEFAULT_PORTS
 
-    print(f"Scanning {subnet} on ports {ports} ...")
+    print(f"Scanning {', '.join(subnets)} on ports {ports} ...")
 
-    devices: List[Device] = tcp_scan(subnet, timeout=args.timeout, ports=ports)
+    devices: List[Device] = scan_all_subnets(subnets, timeout=args.timeout, ports=ports)
 
     if not devices:
         print("No devices found.")

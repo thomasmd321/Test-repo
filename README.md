@@ -13,16 +13,26 @@ sweep plus the system ARP table if scapy isn't installed or the process
 doesn't have the privileges an ARP scan needs (typically root/administrator).
 
 ```
-python network_scanner.py                 # auto-detect local subnet
-python network_scanner.py 192.168.1.0/24   # scan a specific subnet
+python network_scanner.py                             # auto-detect local subnet
+python network_scanner.py 192.168.1.0/24               # scan a specific subnet
+python network_scanner.py 192.168.1.0/24,10.0.0.0/24   # scan several subnets
+python network_scanner.py --all-subnets                # scan every subnet this
+                                                        # machine has a network
+                                                        # interface on
 python network_scanner.py --timeout 2
 ```
 
-Install scapy to enable the faster ARP-scan path (optional — the script
-works without it via the ping-sweep fallback):
+`--all-subnets` auto-detects and scans every local subnet across all of the
+machine's network interfaces (e.g. Wi-Fi *and* Ethernet, or a VPN), instead
+of just the one on the default route — useful if you're not sure which
+interface a device you're looking for is actually on.
+
+Both optional dependencies below are just that — optional. The script works
+out of the box without either, falling back to slower/less detailed methods.
 
 ```
-pip install scapy
+pip install scapy   # enables the faster ARP-scan path (returns MAC addresses)
+pip install psutil  # enables --all-subnets (interface enumeration)
 ```
 
 ### `mobile_network_scanner.py`
@@ -35,13 +45,18 @@ attempting plain TCP connections to a handful of commonly-open ports (80,
 needs an ordinary client socket.
 
 ```
-python mobile_network_scanner.py                 # auto-detect local subnet
-python mobile_network_scanner.py 192.168.1.0/24   # scan a specific subnet
+python mobile_network_scanner.py                             # auto-detect local subnet
+python mobile_network_scanner.py 192.168.1.0/24               # scan a specific subnet
+python mobile_network_scanner.py 192.168.1.0/24,10.0.0.0/24   # scan several subnets
 python mobile_network_scanner.py --timeout 0.5 --ports 22,80,443
 ```
 
 This is best-effort: it won't find a device with none of the probed ports
 open, so widen `--ports` if you're missing something you expect to see.
+Unlike `network_scanner.py`, it can't auto-detect *every* subnet a device
+is on — the iOS sandbox doesn't expose interface enumeration — but you can
+pass multiple subnets yourself as a comma-separated list if you know them
+(e.g. your Wi-Fi range and a VPN range).
 
 **Running on iPhone:** install [a-Shell](https://apps.apple.com/us/app/a-shell/id1473805438)
 from the App Store (not "a-Shell mini," which strips out `git`), then either

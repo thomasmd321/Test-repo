@@ -86,3 +86,28 @@ class TestTcpScan:
             ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
         assert all(ports == ms.DEFAULT_PORTS for ports in captured_ports)
+
+
+class TestScanAllSubnets:
+    def test_merges_devices_from_every_subnet(self):
+        def fake_tcp_scan(subnet, timeout, ports, max_workers):
+            return {
+                "192.168.1.0/24": [{"ip": "192.168.1.5", "hostname": ""}],
+                "10.0.0.0/24": [{"ip": "10.0.0.9", "hostname": "nas.local"}],
+            }[subnet]
+
+        with patch("mobile_network_scanner.tcp_scan", side_effect=fake_tcp_scan):
+            devices = ms.scan_all_subnets(["192.168.1.0/24", "10.0.0.0/24"], timeout=0.1)
+
+        assert [d["ip"] for d in devices] == ["10.0.0.9", "192.168.1.5"]
+
+    def test_deduplicates_by_ip_across_overlapping_subnets(self):
+        with patch("mobile_network_scanner.tcp_scan", return_value=[{"ip": "192.168.1.5", "hostname": ""}]):
+            devices = ms.scan_all_subnets(["192.168.1.0/24", "192.168.1.0/24"], timeout=0.1)
+
+        assert len(devices) == 1
+
+    def test_empty_subnet_list_returns_empty(self):
+        with patch("mobile_network_scanner.tcp_scan") as mock_tcp_scan:
+            assert ms.scan_all_subnets([], timeout=0.1) == []
+        mock_tcp_scan.assert_not_called()
