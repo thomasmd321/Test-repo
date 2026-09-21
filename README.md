@@ -58,6 +58,12 @@ is on — the iOS sandbox doesn't expose interface enumeration — but you can
 pass multiple subnets yourself as a comma-separated list if you know them
 (e.g. your Wi-Fi range and a VPN range).
 
+Results show which port answered as a hint at what the device is (e.g.
+`8009` = Chromecast, `554` = an RTSP camera, `1900`/`5353` = a UPnP/mDNS
+smart-home device) — see `PORT_SERVICES` in the script for the full list.
+A device with no hostname and an unfamiliar port is worth cross-checking
+against your router's admin page (usually `192.168.1.1` in a browser).
+
 **Running on iPhone:** install [a-Shell](https://apps.apple.com/us/app/a-shell/id1473805438)
 from the App Store (not "a-Shell mini," which strips out `git`), then either
 `git clone` this repo or grab just the one file you need with `curl`:

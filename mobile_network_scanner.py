@@ -32,7 +32,7 @@ import argparse
 import ipaddress
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Iterable, List, Sequence, TypedDict
+from typing import Dict, Iterable, List, Optional, Sequence, TypedDict
 
 
 class Device(TypedDict):
@@ -40,6 +40,11 @@ class Device(TypedDict):
 
     ip: str
     hostname: str
+    # The first port from the probe list that accepted a connection. This
+    # is often a useful fingerprint on its own for a device with no
+    # hostname - see PORT_SERVICES below - though it's only ever *one*
+    # open port, not a full list of everything the device is listening on.
+    port: int
 
 
 # Ports likely to be open on common home/office devices, so a scan finds
@@ -51,8 +56,36 @@ class Device(TypedDict):
 #   5000, 7000          - common dev-server / media-app ports (e.g. AirPlay)
 #   62078               - Apple's "lockdownd" service (iPhones/iPads)
 # This is a heuristic, not an exhaustive list - use --ports to override it
-# if the devices you're looking for listen on something else.
+# if the devices you're looking for listen on something else. A few more
+# worth trying for devices that don't show up above (pass them via
+# --ports, comma-separated alongside these): 53 (DNS), 554 (RTSP/cameras),
+# 1900 (SSDP/UPnP), 5353 (mDNS/Bonjour), 8009 (Chromecast).
 DEFAULT_PORTS: Sequence[int] = (80, 443, 22, 445, 139, 8080, 8443, 62078, 3389, 5000, 7000)
+
+# Short, human-readable labels for well-known ports, used only to annotate
+# the results table - a hint at what a device might be, not a certainty
+# (lots of devices repurpose these ports, or run several services on
+# different ones and only happen to answer on the one we probed first).
+# Covers DEFAULT_PORTS plus the extra ports suggested above, so the label
+# still shows up if you pass those in via --ports.
+PORT_SERVICES: Dict[int, str] = {
+    80: "http",
+    443: "https",
+    22: "ssh",
+    445: "smb",
+    139: "netbios",
+    8080: "http-alt",
+    8443: "https-alt",
+    62078: "lockdownd (iOS)",
+    3389: "rdp",
+    5000: "upnp/airplay",
+    7000: "airplay",
+    53: "dns",
+    554: "rtsp (camera/streaming)",
+    1900: "ssdp/upnp",
+    5353: "mdns/bonjour",
+    8009: "chromecast",
+}
 
 
 def get_local_subnet() -> str:
@@ -75,8 +108,8 @@ def get_local_subnet() -> str:
     return str(network)
 
 
-def probe_host(ip: str, ports: Iterable[int], timeout: float) -> bool:
-    """Return True if any of the given TCP ports accept a connection on ip.
+def probe_host(ip: str, ports: Iterable[int], timeout: float) -> Optional[int]:
+    """Try connecting to each of the given TCP ports on ip, in order.
 
     Uses an ordinary client TCP socket - the only kind of socket a
     sandboxed app is allowed to open - so this works without root,
@@ -88,8 +121,9 @@ def probe_host(ip: str, ports: Iterable[int], timeout: float) -> bool:
         timeout: Per-port connection timeout, in seconds.
 
     Returns:
-        True if at least one port accepted a connection (host is up),
-        False if every port timed out or was refused.
+        The first port that accepted a connection (host is up, and this
+        is a hint at what service/device it might be - see
+        PORT_SERVICES), or None if every port timed out or was refused.
     """
     for port in ports:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -100,8 +134,8 @@ def probe_host(ip: str, ports: Iterable[int], timeout: float) -> bool:
             # 0 means the TCP handshake completed, i.e. something is
             # listening on that port and the host is reachable.
             if sock.connect_ex((ip, port)) == 0:
-                return True
-    return False
+                return port
+    return None
 
 
 def tcp_scan(
@@ -124,7 +158,8 @@ def tcp_scan(
 
     Returns:
         Discovered devices sorted by IP address, each with "hostname"
-        populated if reverse DNS resolved it, or "" if not.
+        populated if reverse DNS resolved it (or "" if not) and "port"
+        set to whichever probed port answered first.
     """
     # strict=False: subnet may be given as a host address (e.g. from
     # get_local_subnet()) rather than a "clean" network address.
@@ -133,7 +168,10 @@ def tcp_scan(
     # aren't assignable to real devices.
     hosts = list(network.hosts())
 
-    live_ips = []
+    # Maps each live host to the port that answered, so tcp_scan() can
+    # report it alongside the hostname - a useful fingerprint for devices
+    # with no reverse-DNS name (see PORT_SERVICES).
+    matched_ports: Dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit every probe up front; futures maps each pending result
         # back to the IP it's checking, since as_completed() only hands
@@ -141,12 +179,12 @@ def tcp_scan(
         futures = {executor.submit(probe_host, str(ip), ports, timeout): ip for ip in hosts}
         for future in as_completed(futures):
             ip = futures[future]
-            if future.result():
-                live_ips.append(ip)
+            port = future.result()
+            if port is not None:
+                matched_ports[str(ip)] = port
 
     devices: List[Device] = []
-    for ip in live_ips:
-        ip_str = str(ip)
+    for ip_str, port in matched_ports.items():
         try:
             # gethostbyaddr does a reverse-DNS (PTR) lookup; on a home
             # network this usually only resolves for the router itself,
@@ -156,7 +194,7 @@ def tcp_scan(
             # No PTR record, or the lookup timed out/failed outright -
             # either way, we just don't have a hostname for this device.
             hostname = ""
-        devices.append({"ip": ip_str, "hostname": hostname})
+        devices.append({"ip": ip_str, "hostname": hostname, "port": port})
 
     # Sort numerically by IP (not lexicographically as strings, which would
     # put "10.0.0.2" after "10.0.0.10").
@@ -225,10 +263,14 @@ def main() -> None:
 
     # Fixed-width columns keep the table aligned regardless of how long
     # each IP/hostname value happens to be.
-    print(f"\n{'IP Address':<18}Hostname")
-    print("-" * 40)
+    print(f"\n{'IP Address':<18}{'Port':<8}{'Service':<24}Hostname")
+    print("-" * 70)
     for device in devices:
-        print(f"{device['ip']:<18}{device.get('hostname', '')}")
+        port = device["port"]
+        # Fall back to just the bare port number for anything not in
+        # PORT_SERVICES (e.g. a custom --ports value we don't recognize).
+        service = PORT_SERVICES.get(port, "?")
+        print(f"{device['ip']:<18}{port:<8}{service:<24}{device.get('hostname', '')}")
     print(f"\n{len(devices)} device(s) found.")
 
 

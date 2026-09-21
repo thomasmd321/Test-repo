@@ -17,21 +17,21 @@ class TestGetLocalSubnet:
 
 
 class TestProbeHost:
-    def test_returns_true_when_a_port_accepts_connection(self):
+    def test_returns_matched_port_when_one_accepts_connection(self):
         fake_sock = MagicMock()
         fake_sock.__enter__.return_value = fake_sock
         fake_sock.connect_ex.side_effect = [1, 0]
 
         with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
-            assert ms.probe_host("192.168.1.1", [80, 443], timeout=0.1) is True
+            assert ms.probe_host("192.168.1.1", [80, 443], timeout=0.1) == 443
 
-    def test_returns_false_when_no_ports_accept_connection(self):
+    def test_returns_none_when_no_ports_accept_connection(self):
         fake_sock = MagicMock()
         fake_sock.__enter__.return_value = fake_sock
         fake_sock.connect_ex.return_value = 1
 
         with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
-            assert ms.probe_host("192.168.1.1", [80, 443], timeout=0.1) is False
+            assert ms.probe_host("192.168.1.1", [80, 443], timeout=0.1) is None
 
     def test_stops_probing_after_first_success(self):
         fake_sock = MagicMock()
@@ -47,7 +47,7 @@ class TestProbeHost:
 class TestTcpScan:
     def test_returns_only_live_hosts_sorted_by_ip(self):
         def fake_probe(ip, ports, timeout):
-            return ip in ("192.168.1.2", "192.168.1.10")
+            return 80 if ip in ("192.168.1.2", "192.168.1.10") else None
 
         with patch("mobile_network_scanner.probe_host", side_effect=fake_probe), \
                 patch("mobile_network_scanner.socket.gethostbyaddr", side_effect=socket.herror):
@@ -57,22 +57,22 @@ class TestTcpScan:
         assert ips == sorted(ips, key=lambda ip: tuple(int(p) for p in ip.split(".")))
         assert set(ips) == {"192.168.1.2", "192.168.1.10"}
 
-    def test_attaches_hostname_when_available(self):
-        with patch("mobile_network_scanner.probe_host", return_value=True), \
+    def test_attaches_hostname_and_matched_port_when_available(self):
+        with patch("mobile_network_scanner.probe_host", return_value=8009), \
                 patch("mobile_network_scanner.socket.gethostbyaddr", return_value=("phone.local", [], ["192.168.1.1"])):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
-        assert {"ip": "192.168.1.1", "hostname": "phone.local"} in devices
+        assert {"ip": "192.168.1.1", "hostname": "phone.local", "port": 8009} in devices
 
     def test_missing_hostname_defaults_to_empty_string(self):
-        with patch("mobile_network_scanner.probe_host", return_value=True), \
+        with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner.socket.gethostbyaddr", side_effect=socket.gaierror):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
         assert all(d["hostname"] == "" for d in devices)
 
     def test_no_live_hosts_returns_empty_list(self):
-        with patch("mobile_network_scanner.probe_host", return_value=False):
+        with patch("mobile_network_scanner.probe_host", return_value=None):
             assert ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4) == []
 
     def test_uses_default_ports_when_none_specified(self):
@@ -80,7 +80,7 @@ class TestTcpScan:
 
         def fake_probe(ip, ports, timeout):
             captured_ports.append(ports)
-            return False
+            return None
 
         with patch("mobile_network_scanner.probe_host", side_effect=fake_probe):
             ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
