@@ -617,6 +617,27 @@ python3 mobile_network_scanner.py --output scan.json"""))
         "Each run overwrites FILE with that scan's results — this is a snapshot of the latest "
         "scan, not an appended history log.", styles["BodySmall"]))
 
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ scan_diff.py
+    story.append(Paragraph("6. Diffing two scans", styles["H1"]))
+    story.append(Paragraph(
+        "scan_diff.py is a third, standalone script that compares two files saved with "
+        "--output above and reports what changed: devices added, devices that disappeared, "
+        "and per-field changes (a different port, hostname, banner, etc.) on devices present "
+        "in both — the same NEW/missing/CHG comparison the scanners do against their own "
+        "known-devices registry, just applied to two snapshots on disk instead.", styles["Body"]))
+    story.append(code_block("""python3 scan_diff.py old.json new.json
+python3 scan_diff.py before.csv after.csv
+python3 scan_diff.py --no-color old.json new.json"""))
+    story.append(Paragraph(
+        "Either file can be JSON or CSV independently (comparing a CSV export against a JSON "
+        "one works fine), and they don't need to come from the same script: fields the two "
+        "scanners don't share (mac/vendor are desktop-only, banner is mobile-only) are still "
+        "compared whenever both files happen to have them. A device is matched across the two "
+        "files by MAC when present, falling back to IP — the same identity rule "
+        "network_scanner.py's own known-devices tracking uses.", styles["Body"]))
+
     doc = SimpleDocTemplate(
         str(out_path),
         pagesize=letter,

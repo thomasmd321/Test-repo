@@ -374,6 +374,28 @@ the latest scan, not an appended history log. A CSV's `risky_ports` column
 is `;`-separated (e.g. `23;445`) since a CSV cell can't hold a real list;
 the JSON export keeps it as a proper array.
 
+## Diffing two scans
+
+`scan_diff.py` compares two files saved with `--output` above and reports
+what changed between them — devices added, devices that disappeared, and
+per-field changes (a different port, hostname, banner, etc.) on devices
+present in both. It's the same NEW/missing/CHG comparison the scanners do
+against their own known-devices registry, just applied to two snapshots on
+disk instead.
+
+```
+python scan_diff.py old.json new.json
+python scan_diff.py before.csv after.csv
+```
+
+Either file can be JSON or CSV (independently — comparing a CSV export
+against a JSON one works fine), and they don't need to come from the same
+script: fields the two scanners don't share (`mac`/`vendor` are
+desktop-only, `banner` is mobile-only) are still compared whenever both
+files happen to have them. A device is matched across the two files by MAC
+when present, falling back to IP — the same identity rule
+`network_scanner.py`'s own known-devices tracking uses.
+
 ## Tests
 
 Unit tests mock all network/subprocess calls, so they run without any real

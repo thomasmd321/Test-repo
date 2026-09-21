@@ -61,6 +61,29 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       only pays off once CSV/JSON export (above) exists to look at it;
       needs a cap/rotation policy so the log doesn't grow unbounded.
 
+- [x] **Scan-diff tool.** A natural complement to CSV/JSON export above:
+      compare two saved scans and report what changed between them
+      (devices added/removed, per-field changes on ones present in
+      both) - the same NEW/missing/CHG comparison the scanners already
+      do against their own registry, just applied to two files instead.
+      Done: `scan_diff.py`, a new standalone script (not added to
+      either scanner) taking two `--output` files as positional args.
+      Works across JSON and CSV interchangeably (`_normalize_device()`
+      coerces CSV's string-typed port/risky_ports back to the same
+      shape JSON already has, so a device unchanged in substance never
+      shows as "changed" just because one file was CSV) and across
+      scripts (matches by MAC when present, falling back to IP - the
+      same rule `network_scanner.py`'s own registry uses - so
+      desktop-only fields like `mac`/`vendor` and mobile-only `banner`
+      are compared whenever both files happen to have them, without
+      either scanner needing to know about the other's schema). Reuses
+      the same green/dim/yellow color language as NEW/missing/CHG.
+      Verified end-to-end against two real scans of a real loopback
+      listener whose port was changed between them (plus a newly
+      appeared second device) - once via JSON, once via CSV, and once
+      comparing a CSV file against a JSON one - all three correctly
+      reported the same added device and port change.
+
 - [x] ~~**TTL-based OS fingerprinting.**~~ Investigated and ruled out -
       not just for iOS, for any platform. The premise was wrong:
       `getsockopt(IPPROTO_IP, IP_TTL)` on a connected socket returns
