@@ -244,9 +244,9 @@ plain sockets and are fully portable:
       paired start/reset code per line and no color bleeding between
       rows.
 
-- [ ] **Custom device labels/aliases** and **export scan results to
-      CSV/JSON** (see the shared ideas above) - neither is platform-
-      specific at all, both are just local file I/O.
+- [ ] **Custom device labels/aliases** (see the shared idea above) - not
+      platform-specific at all, just local file I/O.
+      (Export to CSV/JSON, formerly listed here too, is done - see above.)
 
 Weaker fit, not started: a `--identify IP` deep-dive mode would work for
 banner grabbing and a wider port list, but would be missing the MAC/
