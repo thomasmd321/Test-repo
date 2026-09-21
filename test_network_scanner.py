@@ -579,3 +579,95 @@ class TestScan:
         with patch("network_scanner.arp_scan", side_effect=ValueError("boom")):
             with pytest.raises(ValueError):
                 ns.scan("192.168.1.0/24", timeout=1.0)
+
+
+class TestDeviceIdentity:
+    def test_prefers_mac_over_ip(self):
+        device = {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}
+        assert ns._device_identity(device) == "aa:bb:cc:dd:ee:ff"
+
+    def test_falls_back_to_ip_when_no_mac(self):
+        device = {"ip": "192.168.1.1", "mac": "", "hostname": "", "vendor": ""}
+        assert ns._device_identity(device) == "192.168.1.1"
+
+
+class TestKnownDevicesPersistence:
+    def test_load_returns_empty_dict_when_file_does_not_exist(self, tmp_path):
+        assert ns._load_known_devices(tmp_path / "missing.json") == {}
+
+    def test_load_returns_empty_dict_for_corrupt_json(self, tmp_path):
+        path = tmp_path / "known.json"
+        path.write_text("not valid json {{{", encoding="utf-8")
+        assert ns._load_known_devices(path) == {}
+
+    def test_save_then_load_round_trips(self, tmp_path):
+        path = tmp_path / "nested" / "known.json"
+        data = {"aa:bb:cc:dd:ee:ff": {"ip": "192.168.1.1", "first_seen": "2026-01-01T00:00:00"}}
+
+        ns._save_known_devices(data, path)
+
+        assert ns._load_known_devices(path) == data
+
+    def test_save_does_not_raise_on_unwritable_path(self, tmp_path):
+        # A path whose parent can't be created (e.g. permission denied,
+        # read-only filesystem) shouldn't crash the caller.
+        with patch("network_scanner.Path.mkdir", side_effect=OSError("Permission denied")):
+            ns._save_known_devices({}, tmp_path / "known.json")  # Should not raise.
+
+
+class TestMarkNewDevices:
+    def test_first_time_seen_devices_are_all_new(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [
+            {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "router.local", "vendor": ""},
+            {"ip": "192.168.1.2", "mac": "", "hostname": "", "vendor": ""},
+        ]
+
+        is_new = ns._mark_new_devices(devices, known_devices_path=path)
+
+        assert is_new == {"aa:bb:cc:dd:ee:ff": True, "192.168.1.2": True}
+
+    def test_previously_seen_devices_are_not_new_on_a_later_scan(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}]
+
+        ns._mark_new_devices(devices, known_devices_path=path)  # First scan.
+        is_new = ns._mark_new_devices(devices, known_devices_path=path)  # Second scan.
+
+        assert is_new == {"aa:bb:cc:dd:ee:ff": False}
+
+    def test_only_the_genuinely_new_device_is_flagged(self, tmp_path):
+        path = tmp_path / "known.json"
+        known_device = {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}
+        new_device = {"ip": "192.168.1.99", "mac": "11:22:33:44:55:66", "hostname": "", "vendor": ""}
+
+        ns._mark_new_devices([known_device], known_devices_path=path)
+        is_new = ns._mark_new_devices([known_device, new_device], known_devices_path=path)
+
+        assert is_new == {"aa:bb:cc:dd:ee:ff": False, "11:22:33:44:55:66": True}
+
+    def test_persists_device_details_and_timestamps(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "router.local", "vendor": "Acme"}]
+
+        ns._mark_new_devices(devices, known_devices_path=path)
+
+        stored = ns._load_known_devices(path)["aa:bb:cc:dd:ee:ff"]
+        assert stored["ip"] == "192.168.1.1"
+        assert stored["hostname"] == "router.local"
+        assert stored["vendor"] == "Acme"
+        assert "first_seen" in stored
+        assert "last_seen" in stored
+
+    def test_a_device_identified_by_ip_becomes_new_again_if_its_ip_changes(self, tmp_path):
+        # Documents a known limitation: a MAC-less device (no ARP entry)
+        # is identified by IP alone, so a DHCP lease change makes it
+        # look like a different, "new" device.
+        path = tmp_path / "known.json"
+        ns._mark_new_devices([{"ip": "192.168.1.50", "mac": "", "hostname": "", "vendor": ""}], known_devices_path=path)
+
+        is_new = ns._mark_new_devices(
+            [{"ip": "192.168.1.51", "mac": "", "hostname": "", "vendor": ""}], known_devices_path=path
+        )
+
+        assert is_new == {"192.168.1.51": True}

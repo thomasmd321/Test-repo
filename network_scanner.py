@@ -16,6 +16,12 @@ iOS target, which can't do any of this due to Apple's sandboxing of
 raw-socket multicast traffic; desktop/Termux environments have no such
 restriction.
 
+Every scan is also compared against a small local registry of previously
+seen devices (see _mark_new_devices()), so a device that's never shown up
+before gets flagged "NEW" in the results table. Pair this with --watch to
+turn a one-shot scan into a lightweight "alert me when something joins my
+network" monitor.
+
 Usage:
     python network_scanner.py                     # auto-detect local subnet
     python network_scanner.py 192.168.1.0/24       # scan a specific subnet
@@ -26,10 +32,13 @@ Usage:
                                                     # psutil`)
     python network_scanner.py --timeout 2
     python network_scanner.py --no-vendor-lookup   # skip the OUI vendor lookup
+    python network_scanner.py --watch 300          # rescan every 5 minutes,
+                                                    # flagging newly-seen devices
 """
 
 import argparse
 import ipaddress
+import json
 import platform
 import re
 import socket
@@ -39,6 +48,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, TypedDict
 
@@ -839,6 +849,86 @@ def _attach_vendor_names(devices: List[Device]) -> List[Device]:
     return devices
 
 
+# --- Known-device tracking, for flagging newly-seen devices ---
+
+# A small local registry of every device this script has ever seen,
+# persisted between runs so a scan can tell "this device wasn't here
+# last time" apart from "this device is always here". Lives alongside
+# the OUI vendor cache for the same reason: it's local state specific to
+# this script, not something to check into version control.
+_KNOWN_DEVICES_PATH = Path.home() / ".cache" / "network_scanner_known_devices.json"
+
+
+def _device_identity(device: Device) -> str:
+    """Return the key used to recognize a device across scans.
+
+    A MAC address survives a DHCP lease renewal (which can change a
+    device's IP), so it's preferred whenever one is known; only ping
+    sweep results for a device absent from the ARP cache have no MAC at
+    all, in which case IP is the best identifier available.
+    """
+    return device.get("mac") or device["ip"]
+
+
+def _load_known_devices(path: Path) -> Dict[str, dict]:
+    """Load the known-devices registry from disk.
+
+    Returns:
+        The registry (a dict keyed by _device_identity()), or {} if the
+        file doesn't exist yet (first run) or is unreadable/corrupt.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_known_devices(known: Dict[str, dict], path: Path) -> None:
+    """Persist the known-devices registry to disk.
+
+    Failing to save (read-only filesystem, out of disk space, etc.)
+    deliberately doesn't raise - the NEW/known markers for the scan that
+    just ran are already correct in memory either way, so losing the
+    ability to remember them for *next* time shouldn't crash this run.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(known, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _mark_new_devices(devices: List[Device], known_devices_path: Path = _KNOWN_DEVICES_PATH) -> Dict[str, bool]:
+    """Compare devices against the known-devices registry, updating it on disk.
+
+    Args:
+        devices: This scan's results.
+        known_devices_path: Where the registry is stored between runs
+            (overridable for tests; production code should just use the
+            default).
+
+    Returns:
+        A dict mapping each device's _device_identity() to True if this
+        is the first time it's ever been seen, or False if it was
+        already in the registry from a previous run.
+    """
+    known = _load_known_devices(known_devices_path)
+    now = datetime.now().isoformat(timespec="seconds")
+
+    is_new: Dict[str, bool] = {}
+    for device in devices:
+        key = _device_identity(device)
+        is_new[key] = key not in known
+        entry = known.setdefault(key, {"first_seen": now})
+        entry["last_seen"] = now
+        entry["ip"] = device["ip"]
+        entry["hostname"] = device.get("hostname", "")
+        entry["vendor"] = device.get("vendor", "")
+
+    _save_known_devices(known, known_devices_path)
+    return is_new
+
+
 def scan(subnet: str, timeout: float) -> List[Device]:
     """Scan the subnet, preferring an ARP scan and falling back to a ping sweep.
 
@@ -887,6 +977,23 @@ def main() -> None:
         action="store_true",
         help="Skip looking up each device's MAC vendor (avoids the first-run IEEE OUI registry download, e.g. for an offline scan)",
     )
+    parser.add_argument(
+        "--watch",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Rescan repeatedly every SECONDS instead of running once, printing a NEW marker each time a device wasn't seen in any previous run (Ctrl+C to stop)",
+    )
+    parser.add_argument(
+        "--no-track-devices",
+        action="store_true",
+        help="Don't persist or consult the known-devices registry - no NEW markers, and this run won't be remembered for next time",
+    )
+    parser.add_argument(
+        "--forget-known-devices",
+        action="store_true",
+        help="Clear the known-devices registry before scanning, so every device found in this run is marked NEW",
+    )
     args = parser.parse_args()
 
     # Precedence: an explicit subnet argument always wins; otherwise
@@ -899,35 +1006,68 @@ def main() -> None:
     else:
         subnets = [get_local_subnet()]
 
-    print(f"Scanning {', '.join(subnets)} ...")
+    if args.forget_known_devices:
+        _save_known_devices({}, _KNOWN_DEVICES_PATH)
 
-    try:
-        devices: List[Device] = scan_all_subnets(
-            subnets, args.timeout, mdns_timeout=args.mdns_timeout, vendor_lookup=not args.no_vendor_lookup
-        )
-    except RuntimeError as exc:
-        # A missing required dependency (e.g. no `ping` binary at all) -
-        # print the specific reason instead of a raw traceback, since
-        # there's nothing the user can do to retry, only to fix their
-        # environment.
-        print(f"Error: {exc}")
-        raise SystemExit(1)
+    def run_once() -> None:
+        """Scan once, mark/print NEW devices, and print the results table."""
+        print(f"Scanning {', '.join(subnets)} ...")
 
-    if not devices:
-        print("No devices found.")
-        return
+        try:
+            devices: List[Device] = scan_all_subnets(
+                subnets, args.timeout, mdns_timeout=args.mdns_timeout, vendor_lookup=not args.no_vendor_lookup
+            )
+        except RuntimeError as exc:
+            # A missing required dependency (e.g. no `ping` binary at
+            # all) - print the specific reason instead of a raw
+            # traceback, since there's nothing the user can do to
+            # retry, only to fix their environment. Fatal even under
+            # --watch: if this environment can't scan once, it can't
+            # scan on a timer either.
+            print(f"Error: {exc}")
+            raise SystemExit(1)
 
-    # Fixed-width columns keep the table aligned regardless of how long
-    # each IP/MAC/hostname/vendor value happens to be.
-    print(f"\n{'IP Address':<18}{'MAC Address':<20}{'Vendor':<24}Hostname")
-    print("-" * 90)
-    for device in devices:
-        # "-" as a placeholder makes it visually obvious that a value is
-        # missing, rather than leaving a confusing blank gap.
-        mac_display = device.get("mac") or "-"
-        vendor_display = device.get("vendor") or "-"
-        print(f"{device['ip']:<18}{mac_display:<20}{vendor_display:<24}{device.get('hostname', '')}")
-    print(f"\n{len(devices)} device(s) found.")
+        if not devices:
+            print("No devices found.")
+            return
+
+        is_new = {} if args.no_track_devices else _mark_new_devices(devices)
+
+        # A leading marker column (rather than reflowing every other
+        # column's width) keeps a NEW device visually obvious without
+        # disturbing the table's layout when tracking is off.
+        print(f"\n{'':<5}{'IP Address':<18}{'MAC Address':<20}{'Vendor':<24}Hostname")
+        print("-" * 95)
+        new_count = 0
+        for device in devices:
+            # "-" as a placeholder makes it visually obvious that a
+            # value is missing, rather than leaving a confusing blank gap.
+            mac_display = device.get("mac") or "-"
+            vendor_display = device.get("vendor") or "-"
+            if is_new.get(_device_identity(device)):
+                marker = "NEW  "
+                new_count += 1
+            else:
+                marker = "     "
+            print(f"{marker}{device['ip']:<18}{mac_display:<20}{vendor_display:<24}{device.get('hostname', '')}")
+
+        print(f"\n{len(devices)} device(s) found.", end="")
+        if not args.no_track_devices:
+            print(f" {new_count} new since last seen.")
+        else:
+            print()
+
+    if args.watch:
+        print(f"Watch mode: rescanning every {args.watch:g}s (Ctrl+C to stop).")
+        try:
+            while True:
+                print(f"\n=== {datetime.now().isoformat(timespec='seconds')} ===")
+                run_once()
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+    else:
+        run_once()
 
 
 if __name__ == "__main__":

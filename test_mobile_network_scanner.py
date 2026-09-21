@@ -436,3 +436,75 @@ class TestScanAllSubnets:
         with patch("mobile_network_scanner.tcp_scan") as mock_tcp_scan:
             assert ms.scan_all_subnets([], timeout=0.1) == []
         mock_tcp_scan.assert_not_called()
+
+
+class TestDeviceIdentity:
+    def test_uses_ip_as_the_identity(self):
+        device = {"ip": "192.168.1.72", "hostname": "", "port": 8009}
+        assert ms._device_identity(device) == "192.168.1.72"
+
+
+class TestKnownDevicesPersistence:
+    def test_load_returns_empty_dict_when_file_does_not_exist(self, tmp_path):
+        assert ms._load_known_devices(tmp_path / "missing.json") == {}
+
+    def test_load_returns_empty_dict_for_corrupt_json(self, tmp_path):
+        path = tmp_path / "known.json"
+        path.write_text("not valid json {{{", encoding="utf-8")
+        assert ms._load_known_devices(path) == {}
+
+    def test_save_then_load_round_trips(self, tmp_path):
+        path = tmp_path / "nested" / "known.json"
+        data = {"192.168.1.1": {"port": 80, "first_seen": "2026-01-01T00:00:00"}}
+
+        ms._save_known_devices(data, path)
+
+        assert ms._load_known_devices(path) == data
+
+    def test_save_does_not_raise_on_unwritable_path(self, tmp_path):
+        with patch("mobile_network_scanner.Path.mkdir", side_effect=OSError("Permission denied")):
+            ms._save_known_devices({}, tmp_path / "known.json")  # Should not raise.
+
+
+class TestMarkNewDevices:
+    def test_first_time_seen_devices_are_all_new(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [
+            {"ip": "192.168.1.1", "hostname": "router.local", "port": 80},
+            {"ip": "192.168.1.72", "hostname": "", "port": 8009},
+        ]
+
+        is_new = ms._mark_new_devices(devices, known_devices_path=path)
+
+        assert is_new == {"192.168.1.1": True, "192.168.1.72": True}
+
+    def test_previously_seen_devices_are_not_new_on_a_later_scan(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [{"ip": "192.168.1.1", "hostname": "router.local", "port": 80}]
+
+        ms._mark_new_devices(devices, known_devices_path=path)
+        is_new = ms._mark_new_devices(devices, known_devices_path=path)
+
+        assert is_new == {"192.168.1.1": False}
+
+    def test_only_the_genuinely_new_device_is_flagged(self, tmp_path):
+        path = tmp_path / "known.json"
+        known_device = {"ip": "192.168.1.1", "hostname": "router.local", "port": 80}
+        new_device = {"ip": "192.168.1.99", "hostname": "", "port": 8009}
+
+        ms._mark_new_devices([known_device], known_devices_path=path)
+        is_new = ms._mark_new_devices([known_device, new_device], known_devices_path=path)
+
+        assert is_new == {"192.168.1.1": False, "192.168.1.99": True}
+
+    def test_persists_device_details_and_timestamps(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [{"ip": "192.168.1.72", "hostname": "Living Room TV", "port": 8009}]
+
+        ms._mark_new_devices(devices, known_devices_path=path)
+
+        stored = ms._load_known_devices(path)["192.168.1.72"]
+        assert stored["port"] == 8009
+        assert stored["hostname"] == "Living Room TV"
+        assert "first_seen" in stored
+        assert "last_seen" in stored

@@ -31,19 +31,32 @@ has just one active local network (Wi-Fi) at a time. If you do know of more
 than one subnet to check (e.g. your Wi-Fi range and a VPN range), pass them
 as a comma-separated list and this script will scan each of them.
 
+Every scan is also compared against a small local registry of previously
+seen devices (see _mark_new_devices()), so a device that's never shown up
+before gets flagged "NEW" in the results table. Pair this with --watch to
+turn a one-shot scan into a lightweight "alert me when something joins my
+network" monitor - though note this script has no MAC address to key on
+(see _device_identity()), so a device is tracked by IP alone, and a DHCP
+lease change will make it look "new" again.
+
 Usage:
     python mobile_network_scanner.py                    # auto-detect local subnet
     python mobile_network_scanner.py 192.168.1.0/24      # scan a specific subnet
     python mobile_network_scanner.py 192.168.1.0/24,10.0.0.0/24  # scan several
     python mobile_network_scanner.py --timeout 0.5 --ports 22,80,443
+    python mobile_network_scanner.py --watch 300         # rescan every 5 minutes,
+                                                          # flagging newly-seen devices
 """
 
 import argparse
 import ipaddress
+import json
 import socket
 import struct
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TypedDict
 
 
@@ -692,6 +705,83 @@ def scan_all_subnets(
     return sorted(devices_by_ip.values(), key=lambda d: ipaddress.ip_address(d["ip"]))
 
 
+# --- Known-device tracking, for flagging newly-seen devices ---
+
+# A small local registry of every device this script has ever seen,
+# persisted between runs so a scan can tell "this device wasn't here
+# last time" apart from "this device is always here".
+_KNOWN_DEVICES_PATH = Path.home() / ".cache" / "mobile_network_scanner_known_devices.json"
+
+
+def _device_identity(device: Device) -> str:
+    """Return the key used to recognize a device across scans.
+
+    Unlike network_scanner.py, this script never has a MAC address to
+    key on (TCP port probing reveals nothing below the IP layer), so a
+    device's IP is the only identifier available - meaning a DHCP lease
+    change will make a device look "new" again even though it isn't.
+    """
+    return device["ip"]
+
+
+def _load_known_devices(path: Path) -> Dict[str, dict]:
+    """Load the known-devices registry from disk.
+
+    Returns:
+        The registry (a dict keyed by _device_identity()), or {} if the
+        file doesn't exist yet (first run) or is unreadable/corrupt.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_known_devices(known: Dict[str, dict], path: Path) -> None:
+    """Persist the known-devices registry to disk.
+
+    Failing to save (read-only filesystem, out of disk space, etc.)
+    deliberately doesn't raise - the NEW/known markers for the scan that
+    just ran are already correct in memory either way, so losing the
+    ability to remember them for *next* time shouldn't crash this run.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(known, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _mark_new_devices(devices: List[Device], known_devices_path: Path = _KNOWN_DEVICES_PATH) -> Dict[str, bool]:
+    """Compare devices against the known-devices registry, updating it on disk.
+
+    Args:
+        devices: This scan's results.
+        known_devices_path: Where the registry is stored between runs
+            (overridable for tests; production code should just use the
+            default).
+
+    Returns:
+        A dict mapping each device's _device_identity() to True if this
+        is the first time it's ever been seen, or False if it was
+        already in the registry from a previous run.
+    """
+    known = _load_known_devices(known_devices_path)
+    now = datetime.now().isoformat(timespec="seconds")
+
+    is_new: Dict[str, bool] = {}
+    for device in devices:
+        key = _device_identity(device)
+        is_new[key] = key not in known
+        entry = known.setdefault(key, {"first_seen": now})
+        entry["last_seen"] = now
+        entry["port"] = device.get("port")
+        entry["hostname"] = device.get("hostname", "")
+
+    _save_known_devices(known, known_devices_path)
+    return is_new
+
+
 def main() -> None:
     """CLI entry point: parse arguments, run the scan, and print a results table."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -708,6 +798,23 @@ def main() -> None:
         default=0.3,
         help="Timeout in seconds for the mDNS/Bonjour hostname fallback, used when reverse DNS finds nothing (default: 0.3)",
     )
+    parser.add_argument(
+        "--watch",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Rescan repeatedly every SECONDS instead of running once, printing a NEW marker each time a device wasn't seen in any previous run (Ctrl+C to stop)",
+    )
+    parser.add_argument(
+        "--no-track-devices",
+        action="store_true",
+        help="Don't persist or consult the known-devices registry - no NEW markers, and this run won't be remembered for next time",
+    )
+    parser.add_argument(
+        "--forget-known-devices",
+        action="store_true",
+        help="Clear the known-devices registry before scanning, so every device found in this run is marked NEW",
+    )
     args = parser.parse_args()
 
     # If the user didn't pass a subnet, auto-detect it from the device's
@@ -721,27 +828,58 @@ def main() -> None:
     # built-in defaults if the flag wasn't given at all.
     ports: Sequence[int] = tuple(int(p) for p in args.ports.split(",")) if args.ports else DEFAULT_PORTS
 
-    print(f"Scanning {', '.join(subnets)} on ports {ports} ...")
+    if args.forget_known_devices:
+        _save_known_devices({}, _KNOWN_DEVICES_PATH)
 
-    devices: List[Device] = scan_all_subnets(
-        subnets, timeout=args.timeout, ports=ports, mdns_timeout=args.mdns_timeout
-    )
+    def run_once() -> None:
+        """Scan once, mark/print NEW devices, and print the results table."""
+        print(f"Scanning {', '.join(subnets)} on ports {ports} ...")
 
-    if not devices:
-        print("No devices found.")
-        return
+        devices: List[Device] = scan_all_subnets(
+            subnets, timeout=args.timeout, ports=ports, mdns_timeout=args.mdns_timeout
+        )
 
-    # Fixed-width columns keep the table aligned regardless of how long
-    # each IP/hostname value happens to be.
-    print(f"\n{'IP Address':<18}{'Port':<8}{'Service':<24}Hostname")
-    print("-" * 70)
-    for device in devices:
-        port = device["port"]
-        # Fall back to just the bare port number for anything not in
-        # PORT_SERVICES (e.g. a custom --ports value we don't recognize).
-        service = PORT_SERVICES.get(port, "?")
-        print(f"{device['ip']:<18}{port:<8}{service:<24}{device.get('hostname', '')}")
-    print(f"\n{len(devices)} device(s) found.")
+        if not devices:
+            print("No devices found.")
+            return
+
+        is_new = {} if args.no_track_devices else _mark_new_devices(devices)
+
+        # A leading marker column (rather than reflowing every other
+        # column's width) keeps a NEW device visually obvious without
+        # disturbing the table's layout when tracking is off.
+        print(f"\n{'':<5}{'IP Address':<18}{'Port':<8}{'Service':<24}Hostname")
+        print("-" * 75)
+        new_count = 0
+        for device in devices:
+            port = device["port"]
+            # Fall back to just the bare port number for anything not in
+            # PORT_SERVICES (e.g. a custom --ports value we don't recognize).
+            service = PORT_SERVICES.get(port, "?")
+            if is_new.get(_device_identity(device)):
+                marker = "NEW  "
+                new_count += 1
+            else:
+                marker = "     "
+            print(f"{marker}{device['ip']:<18}{port:<8}{service:<24}{device.get('hostname', '')}")
+
+        print(f"\n{len(devices)} device(s) found.", end="")
+        if not args.no_track_devices:
+            print(f" {new_count} new since last seen.")
+        else:
+            print()
+
+    if args.watch:
+        print(f"Watch mode: rescanning every {args.watch:g}s (Ctrl+C to stop).")
+        try:
+            while True:
+                print(f"\n=== {datetime.now().isoformat(timespec='seconds')} ===")
+                run_once()
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+    else:
+        run_once()
 
 
 if __name__ == "__main__":

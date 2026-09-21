@@ -151,6 +151,37 @@ curl -O https://raw.githubusercontent.com/thomasmd321/Test-repo/claude/local-net
 python3 mobile_network_scanner.py
 ```
 
+## Known-device tracking and watch mode
+
+Both scripts persist a small local registry of every device they've ever
+seen (`~/.cache/network_scanner_known_devices.json` and
+`~/.cache/mobile_network_scanner_known_devices.json` respectively) and
+flag anything not in it with a leading `NEW` marker in the results table.
+`network_scanner.py` keys a device by its MAC address when it has one
+(falling back to IP otherwise); `mobile_network_scanner.py` has no MAC to
+work with at all, so it always keys by IP — meaning a DHCP lease change
+there will make an existing device look "new" again.
+
+```
+python network_scanner.py                      # NEW markers on by default
+python network_scanner.py --no-track-devices    # skip tracking entirely
+python network_scanner.py --forget-known-devices  # reset the registry, marking
+                                                   # everything NEW this run
+```
+
+Pair this with `--watch SECONDS` to rescan on a timer instead of once,
+turning either script into a lightweight "alert me when something joins
+my network" monitor you leave running in a terminal (Ctrl+C to stop):
+
+```
+python network_scanner.py --watch 300           # rescan every 5 minutes
+python mobile_network_scanner.py --watch 300
+```
+
+The very first run (or right after `--forget-known-devices`) will mark
+every device `NEW`, since nothing has been seen before yet — that's
+expected, not a bug.
+
 ## Tests
 
 Unit tests mock all network/subprocess calls, so they run without any real
