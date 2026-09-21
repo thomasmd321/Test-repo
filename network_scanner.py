@@ -955,6 +955,36 @@ def _mark_new_devices(devices: List[Device], known_devices_path: Path = _KNOWN_D
     return is_new
 
 
+def _find_missing_devices(devices: List[Device], known_devices_path: Path = _KNOWN_DEVICES_PATH) -> List[dict]:
+    """Find registry entries for devices that didn't show up in this scan.
+
+    The inverse of _mark_new_devices(): instead of flagging what's newly
+    *present*, this reports what's newly *absent* - a device seen in some
+    previous scan (e.g. a laptop that's asleep, or something unplugged)
+    but missing from this one. The registry itself is never pruned here
+    (or anywhere) - a device just stops appearing in this list again once
+    it's seen in a later scan, the same way it would in real life.
+
+    Args:
+        devices: This scan's results.
+        known_devices_path: Where the registry is stored between runs
+            (overridable for tests; production code should just use the
+            default).
+
+    Returns:
+        Registry entries (each augmented with its identity key under
+        "key") for every known device absent from devices, sorted by
+        that key for stable output. This intentionally doesn't
+        distinguish "gone for good" from "temporarily offline" - that's
+        not something a single scan can tell.
+    """
+    known = _load_known_devices(known_devices_path)
+    current_keys = {_device_identity(device) for device in devices}
+
+    missing = [dict(entry, key=key) for key, entry in known.items() if key not in current_keys]
+    return sorted(missing, key=lambda entry: entry["key"])
+
+
 def scan(subnet: str, timeout: float) -> List[Device]:
     """Scan the subnet, preferring an ARP scan and falling back to a ping sweep.
 
@@ -1066,7 +1096,18 @@ def main() -> None:
             print("No devices found.")
             return
 
-        is_new = {} if args.no_track_devices else _mark_new_devices(devices)
+        # known_devices_path is passed explicitly (rather than relying
+        # on these functions' own default parameter) so that anything
+        # overriding the module-level _KNOWN_DEVICES_PATH - a test, or a
+        # future --known-devices-file flag - is actually respected here,
+        # instead of these calls silently keeping whatever path was
+        # bound to the default argument at function-definition time.
+        is_new = {} if args.no_track_devices else _mark_new_devices(devices, known_devices_path=_KNOWN_DEVICES_PATH)
+        missing = (
+            []
+            if args.no_track_devices
+            else _find_missing_devices(devices, known_devices_path=_KNOWN_DEVICES_PATH)
+        )
 
         # A leading marker column (rather than reflowing every other
         # column's width) keeps a NEW device visually obvious without
@@ -1091,6 +1132,15 @@ def main() -> None:
             print(f" {new_count} new since last seen.")
         else:
             print()
+
+        if missing:
+            print(f"\n{len(missing)} previously-seen device(s) not found in this scan:")
+            for entry in missing:
+                # Whichever of hostname/vendor is set makes an otherwise
+                # bare key (a MAC or IP) recognizable at a glance.
+                label = entry.get("hostname") or entry.get("vendor") or ""
+                suffix = f"  ({label})" if label else ""
+                print(f"  {entry['key']:<20} last seen {entry.get('last_seen', '?')}{suffix}")
 
     if args.watch:
         print(f"Watch mode: rescanning every {args.watch:g}s (Ctrl+C to stop).")

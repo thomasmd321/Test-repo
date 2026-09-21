@@ -508,3 +508,45 @@ class TestMarkNewDevices:
         assert stored["hostname"] == "Living Room TV"
         assert "first_seen" in stored
         assert "last_seen" in stored
+
+
+class TestFindMissingDevices:
+    def test_empty_registry_reports_nothing_missing(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [{"ip": "192.168.1.1", "hostname": "", "port": 80}]
+
+        assert ms._find_missing_devices(devices, known_devices_path=path) == []
+
+    def test_device_absent_from_this_scan_is_reported_missing(self, tmp_path):
+        path = tmp_path / "known.json"
+        router = {"ip": "192.168.1.1", "hostname": "router.local", "port": 80}
+        chromecast = {"ip": "192.168.1.72", "hostname": "Living Room TV", "port": 8009}
+
+        ms._mark_new_devices([router, chromecast], known_devices_path=path)
+
+        missing = ms._find_missing_devices([router], known_devices_path=path)  # Chromecast unplugged.
+
+        assert len(missing) == 1
+        assert missing[0]["key"] == "192.168.1.72"
+        assert missing[0]["hostname"] == "Living Room TV"
+
+    def test_device_present_in_this_scan_is_not_reported_missing(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.1", "hostname": "", "port": 80}
+
+        ms._mark_new_devices([device], known_devices_path=path)
+
+        assert ms._find_missing_devices([device], known_devices_path=path) == []
+
+    def test_results_are_sorted_by_identity_key(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [
+            {"ip": "192.168.1.9", "hostname": "", "port": 80},
+            {"ip": "192.168.1.2", "hostname": "", "port": 80},
+        ]
+
+        ms._mark_new_devices(devices, known_devices_path=path)
+
+        missing = ms._find_missing_devices([], known_devices_path=path)
+
+        assert [entry["key"] for entry in missing] == ["192.168.1.2", "192.168.1.9"]

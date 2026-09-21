@@ -747,3 +747,59 @@ class TestMarkNewDevices:
         )
 
         assert is_new == {"192.168.1.51": True}
+
+
+class TestFindMissingDevices:
+    def test_empty_registry_reports_nothing_missing(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}]
+
+        assert ns._find_missing_devices(devices, known_devices_path=path) == []
+
+    def test_device_absent_from_this_scan_is_reported_missing(self, tmp_path):
+        path = tmp_path / "known.json"
+        router = {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "router.local", "vendor": "Acme"}
+        laptop = {"ip": "192.168.1.50", "mac": "11:22:33:44:55:66", "hostname": "", "vendor": ""}
+
+        ns._mark_new_devices([router, laptop], known_devices_path=path)
+
+        missing = ns._find_missing_devices([router], known_devices_path=path)  # Laptop asleep this time.
+
+        assert len(missing) == 1
+        assert missing[0]["key"] == "11:22:33:44:55:66"
+        assert "last_seen" in missing[0]
+
+    def test_device_present_in_this_scan_is_not_reported_missing(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}
+
+        ns._mark_new_devices([device], known_devices_path=path)
+
+        assert ns._find_missing_devices([device], known_devices_path=path) == []
+
+    def test_device_missing_again_still_stays_in_the_registry(self, tmp_path):
+        # The registry itself is never pruned - a device just keeps
+        # showing up in the missing list across scans until it's seen
+        # again, rather than being forgotten after one absence.
+        path = tmp_path / "known.json"
+        router = {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}
+        laptop = {"ip": "192.168.1.50", "mac": "11:22:33:44:55:66", "hostname": "", "vendor": ""}
+
+        ns._mark_new_devices([router, laptop], known_devices_path=path)
+        ns._mark_new_devices([router], known_devices_path=path)  # Scan 2: laptop missing.
+        missing = ns._find_missing_devices([router], known_devices_path=path)  # Scan 3: still missing.
+
+        assert [entry["key"] for entry in missing] == ["11:22:33:44:55:66"]
+
+    def test_results_are_sorted_by_identity_key(self, tmp_path):
+        path = tmp_path / "known.json"
+        devices = [
+            {"ip": "192.168.1.1", "mac": "cc:cc:cc:cc:cc:cc", "hostname": "", "vendor": ""},
+            {"ip": "192.168.1.2", "mac": "aa:aa:aa:aa:aa:aa", "hostname": "", "vendor": ""},
+        ]
+
+        ns._mark_new_devices(devices, known_devices_path=path)
+
+        missing = ns._find_missing_devices([], known_devices_path=path)
+
+        assert [entry["key"] for entry in missing] == ["aa:aa:aa:aa:aa:aa", "cc:cc:cc:cc:cc:cc"]
