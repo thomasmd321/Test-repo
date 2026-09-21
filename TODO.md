@@ -3,7 +3,7 @@
 Ideas discussed but not yet implemented, for `network_scanner.py` and
 `mobile_network_scanner.py`.
 
-- [ ] **Notifications for `--watch` mode.** Right now a NEW-device alert
+- [x] **Notifications for `--watch` mode.** Right now a NEW-device alert
       only exists if someone is actively watching the terminal when it
       prints. Add a way to get pinged when something new shows up:
       - Default to a **webhook** POST (e.g. to Slack, or a push service
@@ -11,6 +11,26 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
         `urllib`.
       - Optionally support email (needs SMTP config) or a desktop
         notification (needs a platform-specific library) as alternatives.
+      Done: `send_webhook_notification()` + `_build_notification_message()`
+      in both scripts, plus `--notify-webhook URL`. Fires on the same
+      trigger `--quiet` uses (a NEW device, a port change, a missing
+      device, or a risky port) - a boring scan sends nothing. POSTs
+      `{"text": message}` JSON, the format Slack's incoming webhooks (and
+      many other generic receivers) expect directly, deliberately not
+      special-cased per service (Discord's `content` key, ntfy.sh's
+      plain-text body) - kept to one simple, documented format rather
+      than branching on the target URL. A failed/unreachable webhook
+      warns to stderr and never crashes the scan. Email/desktop
+      notifications not implemented - the webhook covers the
+      no-extra-dependency case the TODO called out as the default, and
+      both alternatives need something (SMTP config, a platform-specific
+      library) neither script currently has any reason to carry.
+      Verified end-to-end against a real local HTTP server acting as a
+      webhook receiver, on both scripts: a NEW device delivered the
+      correct JSON payload, a repeat scan with nothing changed sent
+      nothing at all, a port change re-triggered delivery with the
+      correct old->new summary, and an unreachable URL printed a warning
+      without crashing the scan.
 
 - [x] **Export scan results to CSV/JSON.** A `--output results.json` (or
       `.csv`) flag to save each scan's results to a file, so they can be

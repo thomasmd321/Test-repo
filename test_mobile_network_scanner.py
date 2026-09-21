@@ -2,6 +2,7 @@ import csv
 import json
 import socket
 import struct
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -259,6 +260,101 @@ class TestExportResults:
 
         header = path.read_text(encoding="utf-8").splitlines()[0]
         assert header == "ip,hostname,port,banner,risky_ports"
+
+
+class TestBuildNotificationMessage:
+    def test_returns_empty_string_when_nothing_to_report(self):
+        message = ms._build_notification_message([], {}, {}, [], [])
+        assert message == ""
+
+    def test_includes_new_devices(self):
+        devices = [{"ip": "192.168.1.1", "hostname": "phone.local"}]
+        is_new = {"192.168.1.1": True}
+
+        message = ms._build_notification_message(devices, is_new, {}, [], [])
+
+        assert "1 new device(s):" in message
+        assert "192.168.1.1  phone.local" in message
+
+    def test_new_device_with_no_hostname_shows_placeholder(self):
+        devices = [{"ip": "192.168.1.1", "hostname": ""}]
+        is_new = {"192.168.1.1": True}
+
+        message = ms._build_notification_message(devices, is_new, {}, [], [])
+
+        assert "(no hostname)" in message
+
+    def test_includes_port_changes(self):
+        devices = [{"ip": "192.168.1.1", "hostname": ""}]
+        port_changes = {"192.168.1.1": (80, 22)}
+
+        message = ms._build_notification_message(devices, {}, port_changes, [], [])
+
+        assert "1 device(s) with a changed port:" in message
+        assert "http (80) -> ssh (22)" in message
+
+    def test_includes_missing_devices(self):
+        missing = [{"key": "192.168.1.1", "hostname": "router.local"}]
+
+        message = ms._build_notification_message([], {}, {}, missing, [])
+
+        assert "1 previously-seen device(s) missing:" in message
+        assert "192.168.1.1 (router.local)" in message
+
+    def test_missing_device_label_takes_priority_over_hostname(self):
+        missing = [{"key": "192.168.1.1", "hostname": "router.local", "label": "Kitchen Echo"}]
+
+        message = ms._build_notification_message([], {}, {}, missing, [])
+
+        assert "(Kitchen Echo)" in message
+        assert "router.local" not in message
+
+    def test_includes_risky_devices(self):
+        risky = [{"ip": "192.168.1.1", "risky_ports": [445, 3389]}]
+
+        message = ms._build_notification_message([], {}, {}, [], risky)
+
+        assert "1 device(s) exposing a risky port:" in message
+        assert "smb (445), rdp (3389)" in message
+
+    def test_combines_multiple_categories_with_blank_line_between(self):
+        devices = [{"ip": "192.168.1.1", "hostname": "phone.local"}]
+        is_new = {"192.168.1.1": True}
+        risky = [{"ip": "192.168.1.2", "risky_ports": [23]}]
+
+        message = ms._build_notification_message(devices, is_new, {}, [], risky)
+
+        assert "1 new device(s):" in message
+        assert "1 device(s) exposing a risky port:" in message
+        assert "\n\n" in message
+
+
+class TestSendWebhookNotification:
+    def test_returns_true_on_a_2xx_response(self):
+        fake_response = MagicMock()
+        fake_response.status = 200
+        fake_response.__enter__.return_value = fake_response
+
+        with patch("mobile_network_scanner.urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+            result = ms.send_webhook_notification("https://example.com/hook", "hello")
+
+        assert result is True
+        request = mock_urlopen.call_args[0][0]
+        assert request.full_url == "https://example.com/hook"
+        assert json.loads(request.data) == {"text": "hello"}
+        assert request.get_header("Content-type") == "application/json"
+
+    def test_returns_false_on_a_non_2xx_response(self):
+        fake_response = MagicMock()
+        fake_response.status = 500
+        fake_response.__enter__.return_value = fake_response
+
+        with patch("mobile_network_scanner.urllib.request.urlopen", return_value=fake_response):
+            assert ms.send_webhook_notification("https://example.com/hook", "hello") is False
+
+    def test_returns_false_and_does_not_raise_on_network_error(self):
+        with patch("mobile_network_scanner.urllib.request.urlopen", side_effect=urllib.error.URLError("no route")):
+            assert ms.send_webhook_notification("https://example.com/hook", "hello") is False
 
 
 class TestCheckLocalSubnet:

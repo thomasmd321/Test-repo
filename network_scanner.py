@@ -1804,6 +1804,97 @@ def export_results(devices: List[Device], path: Path, fieldnames: Sequence[str] 
         _export_json(devices, path)
 
 
+# --- Notifications for --watch (or any run with something to report) ---
+
+def _build_notification_message(
+    devices: List[Device],
+    is_new: Dict[str, bool],
+    port_changes: Dict[str, Tuple[Optional[int], Optional[int]]],
+    missing: List[dict],
+    risky_devices: List[Device],
+) -> str:
+    """Build a plain-text summary of one scan's NEW/CHG/missing/risky findings.
+
+    Same content as the results table's own summary sections, minus the
+    ANSI color codes and table alignment a webhook receiver wouldn't
+    render anyway - built as its own function, independent of the print
+    loop, so it can be unit-tested without capturing stdout.
+
+    Returns:
+        A multi-line summary, or "" if none of the four categories has
+        anything in it - callers should treat that as "nothing to send".
+    """
+    def port_label(port: Optional[int]) -> str:
+        return "(none)" if port is None else f"{PORT_SERVICES.get(port, '?')} ({port})"
+
+    sections: List[str] = []
+
+    new_devices = [d for d in devices if is_new.get(_device_identity(d))]
+    if new_devices:
+        lines = [f"{len(new_devices)} new device(s):"]
+        for device in new_devices:
+            lines.append(f"  {device['ip']}  {device.get('hostname') or '(no hostname)'}")
+        sections.append("\n".join(lines))
+
+    if port_changes:
+        lines = [f"{len(port_changes)} device(s) with a changed port:"]
+        for device in devices:
+            key = _device_identity(device)
+            if key in port_changes:
+                previous_port, current_port = port_changes[key]
+                lines.append(f"  {device['ip']}  {port_label(previous_port)} -> {port_label(current_port)}")
+        sections.append("\n".join(lines))
+
+    if missing:
+        lines = [f"{len(missing)} previously-seen device(s) missing:"]
+        for entry in missing:
+            label = entry.get("label") or entry.get("hostname") or entry.get("vendor") or ""
+            suffix = f" ({label})" if label else ""
+            lines.append(f"  {entry['key']}{suffix}")
+        sections.append("\n".join(lines))
+
+    if risky_devices:
+        lines = [f"{len(risky_devices)} device(s) exposing a risky port:"]
+        for device in risky_devices:
+            port_labels = ", ".join(f"{PORT_SERVICES.get(p, str(p))} ({p})" for p in device["risky_ports"])
+            lines.append(f"  {device['ip']}  {port_labels}")
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
+def send_webhook_notification(url: str, message: str, timeout: float = 5.0) -> bool:
+    """POST message to a webhook URL as JSON: {"text": message}.
+
+    This is the format Slack's incoming webhooks (and many other generic
+    webhook receivers) expect directly - a deliberately simple, single
+    format rather than special-casing any one service's exact schema. A
+    target expecting something else (Discord's "content" key, ntfy.sh's
+    plain-text body) may need a small relay in between.
+
+    Args:
+        url: The webhook endpoint to POST to.
+        message: The notification text (see _build_notification_message()).
+        timeout: How long to wait for the request, in seconds.
+
+    Returns:
+        True if the request got back a 2xx response, False on any
+        failure (network error, timeout, non-2xx status) - logged to
+        stderr but never raised, so a bad or unreachable webhook doesn't
+        crash the scan itself.
+    """
+    payload = json.dumps({"text": message}).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        print(f"Warning: webhook notification failed: {exc}", file=sys.stderr)
+        return False
+
+
 # --- Environment diagnostics (--doctor) ---
 #
 # Most of what this script uses has a documented fallback (no scapy? fall
@@ -2088,6 +2179,13 @@ def main() -> None:
         action="store_true",
         help="Print nothing at all for a scan with no NEW/CHG/missing/risky devices to report - useful for --watch under cron/systemd, so only an interesting run produces output",
     )
+    parser.add_argument(
+        "--notify-webhook",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="POST a summary to URL as {\"text\": ...} JSON (Slack-compatible) whenever a scan has a NEW/CHG/missing/risky device to report - see send_webhook_notification()",
+    )
     args = parser.parse_args()
 
     color = _use_color(args.no_color)
@@ -2209,8 +2307,14 @@ def main() -> None:
         )
         labels = {} if args.no_track_devices else _load_labels(_KNOWN_DEVICES_PATH)
         risky_devices = [d for d in devices if d.get("risky_ports")]
+        has_signal = bool(any(is_new.values()) or port_changes or missing or risky_devices)
 
-        if args.quiet and not (any(is_new.values()) or port_changes or missing or risky_devices):
+        if args.notify_webhook and has_signal:
+            message = _build_notification_message(devices, is_new, port_changes, missing, risky_devices)
+            if message:
+                send_webhook_notification(args.notify_webhook, message)
+
+        if args.quiet and not has_signal:
             # Nothing worth reporting this run - true silence, not even
             # the table header, so a cron/systemd job produces zero
             # output on a boring scan instead of a full report every time.

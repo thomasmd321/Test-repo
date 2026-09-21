@@ -387,6 +387,7 @@ def build_pdf(desktop_diagram: Path, mobile_diagram: Path, terminal_mockup: Path
         crow("Custom device labels", "--set-label / --remove-label", "--set-label / --remove-label"),
         crow("Environment diagnostics", "--doctor", "--doctor"),
         crow("Quiet mode (cron/systemd)", "--quiet", "--quiet"),
+        crow("Webhook notifications", "--notify-webhook", "--notify-webhook"),
     ]
     ct = Table(compare_data, colWidths=[1.5 * inch, 2.5 * inch, 2.5 * inch])
     ct_style = [
@@ -480,6 +481,7 @@ python3 network_scanner.py --output scan.json  # save results to a file"""))
         ("--no-color", "Disable ANSI color output (also respects the <font face=\"Courier\">NO_COLOR</font> env var)."),
         ("--output FILE", "Save this scan's results to FILE as JSON, or CSV if it ends in <font face=\"Courier\">.csv</font>."),
         ("--quiet", "Print nothing for a scan with no NEW/CHG/missing/risky devices - only an interesting run produces output (see --watch under cron/systemd)."),
+        ("--notify-webhook URL", "POST a summary to URL as Slack-compatible JSON whenever a scan has something to report - same trigger as --quiet."),
     ]
     story.append(options_table(desktop_flags))
 
@@ -521,6 +523,7 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
         ("--no-color", "Disable ANSI color output (also respects the <font face=\"Courier\">NO_COLOR</font> env var)."),
         ("--output FILE", "Save this scan's results to FILE as JSON, or CSV if it ends in <font face=\"Courier\">.csv</font>."),
         ("--quiet", "Print nothing for a scan with no NEW/CHG/missing/risky devices - only an interesting run produces output (see --watch under cron/systemd)."),
+        ("--notify-webhook URL", "POST a summary to URL as Slack-compatible JSON whenever a scan has something to report - same trigger as --quiet."),
     ]
     story.append(options_table(mobile_flags))
 
@@ -680,6 +683,27 @@ python3 mobile_network_scanner.py --doctor"""),
             "iOS's Local Network Privacy restriction (see mdns_diagnostic.py), which no retry or "
             "code change here can fix.", styles["BodySmall"]),
     ]))
+
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ Notifications
+    story.append(Paragraph("8. Notifications for --watch", styles["H1"]))
+    story.append(Paragraph(
+        "--notify-webhook URL POSTs a plain-text summary to URL as {\"text\": \"...\"} JSON — the "
+        "format Slack's incoming webhooks (and many other generic webhook receivers) expect "
+        "directly — whenever a scan has a NEW device, a port change, a missing device, or a "
+        "risky port to report. A boring scan sends nothing at all, the same trigger condition "
+        "--quiet uses, so the two pair naturally under --watch.", styles["Body"]))
+    story.append(code_block("""python3 network_scanner.py --watch 300 \\
+  --notify-webhook https://hooks.slack.com/services/...
+python3 mobile_network_scanner.py --watch 300 \\
+  --notify-webhook https://ntfy.sh/your-topic"""))
+    story.append(Paragraph(
+        "A failed or unreachable webhook prints a warning to stderr and the scan continues "
+        "normally — it never crashes the run. This deliberately doesn't special-case any one "
+        "service's exact payload shape; a target expecting something else (Discord's content "
+        "key, ntfy.sh's plain-text body) may need a small relay in between, or just point it at "
+        "a service that already speaks the Slack-compatible format.", styles["Body"]))
 
     doc = SimpleDocTemplate(
         str(out_path),

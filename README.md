@@ -396,6 +396,28 @@ files happen to have them. A device is matched across the two files by MAC
 when present, falling back to IP — the same identity rule
 `network_scanner.py`'s own known-devices tracking uses.
 
+## Notifications for `--watch`
+
+`--notify-webhook URL` POSTs a plain-text summary to `URL` as
+`{"text": "..."}` JSON — the format Slack's incoming webhooks (and many
+other generic webhook receivers, including most self-hosted alerting
+tools) expect directly — whenever a scan has a NEW device, a port change,
+a missing device, or a risky port to report. A boring scan sends nothing
+at all, the same trigger condition `--quiet` uses.
+
+```
+python network_scanner.py --watch 300 --notify-webhook https://hooks.slack.com/services/...
+python mobile_network_scanner.py --watch 300 --notify-webhook https://ntfy.sh/your-topic
+```
+
+A failed or unreachable webhook prints a warning to stderr and the scan
+continues normally — it never crashes the run. This deliberately doesn't
+special-case any one service's exact payload shape; a target expecting
+something else (Discord's `content` key, ntfy.sh's plain-text body) may
+need a small relay in between, or just point it at a service that already
+speaks the Slack-compatible format (many push services, including
+ntfy.sh's JSON publish endpoint, do).
+
 ## Quiet mode and environment diagnostics
 
 `--quiet` suppresses everything — even the scan's own "Scanning..." line —
@@ -404,7 +426,8 @@ missing devices, and no risky ports. As soon as one of those is true, the
 full report prints exactly as it would without `--quiet`. This is meant
 for `--watch` under cron/systemd, where a boring rescan producing zero
 output (rather than a full table every time) is what makes "did anything
-happen" easy to grep for or alert on.
+happen" easy to grep for or alert on — the same trigger condition
+`--notify-webhook` above uses, so the two pair naturally.
 
 ```
 python network_scanner.py --watch 300 --quiet

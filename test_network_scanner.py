@@ -378,6 +378,101 @@ class TestExportResults:
         assert header == "ip,mac,hostname,vendor,port,risky_ports"
 
 
+class TestBuildNotificationMessage:
+    def test_returns_empty_string_when_nothing_to_report(self):
+        message = ns._build_notification_message([], {}, {}, [], [])
+        assert message == ""
+
+    def test_includes_new_devices(self):
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "phone.local"}]
+        is_new = {"aa:bb:cc:dd:ee:ff": True}
+
+        message = ns._build_notification_message(devices, is_new, {}, [], [])
+
+        assert "1 new device(s):" in message
+        assert "192.168.1.1  phone.local" in message
+
+    def test_new_device_with_no_hostname_shows_placeholder(self):
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}]
+        is_new = {"aa:bb:cc:dd:ee:ff": True}
+
+        message = ns._build_notification_message(devices, is_new, {}, [], [])
+
+        assert "(no hostname)" in message
+
+    def test_includes_port_changes(self):
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}]
+        port_changes = {"aa:bb:cc:dd:ee:ff": (80, 23)}
+
+        message = ns._build_notification_message(devices, {}, port_changes, [], [])
+
+        assert "1 device(s) with a changed port:" in message
+        assert "http (80) -> telnet (23)" in message
+
+    def test_includes_missing_devices(self):
+        missing = [{"key": "aa:bb:cc:dd:ee:ff", "hostname": "router.local"}]
+
+        message = ns._build_notification_message([], {}, {}, missing, [])
+
+        assert "1 previously-seen device(s) missing:" in message
+        assert "aa:bb:cc:dd:ee:ff (router.local)" in message
+
+    def test_missing_device_label_takes_priority_over_hostname(self):
+        missing = [{"key": "aa:bb:cc:dd:ee:ff", "hostname": "router.local", "label": "Kitchen Echo"}]
+
+        message = ns._build_notification_message([], {}, {}, missing, [])
+
+        assert "(Kitchen Echo)" in message
+        assert "router.local" not in message
+
+    def test_includes_risky_devices(self):
+        risky = [{"ip": "192.168.1.1", "risky_ports": [23, 445]}]
+
+        message = ns._build_notification_message([], {}, {}, [], risky)
+
+        assert "1 device(s) exposing a risky port:" in message
+        assert "telnet (23), smb (445)" in message
+
+    def test_combines_multiple_categories_with_blank_line_between(self):
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "phone.local"}]
+        is_new = {"aa:bb:cc:dd:ee:ff": True}
+        risky = [{"ip": "192.168.1.2", "risky_ports": [23]}]
+
+        message = ns._build_notification_message(devices, is_new, {}, [], risky)
+
+        assert "1 new device(s):" in message
+        assert "1 device(s) exposing a risky port:" in message
+        assert "\n\n" in message
+
+
+class TestSendWebhookNotification:
+    def test_returns_true_on_a_2xx_response(self):
+        fake_response = MagicMock()
+        fake_response.status = 200
+        fake_response.__enter__.return_value = fake_response
+
+        with patch("network_scanner.urllib.request.urlopen", return_value=fake_response) as mock_urlopen:
+            result = ns.send_webhook_notification("https://example.com/hook", "hello")
+
+        assert result is True
+        request = mock_urlopen.call_args[0][0]
+        assert request.full_url == "https://example.com/hook"
+        assert json.loads(request.data) == {"text": "hello"}
+        assert request.get_header("Content-type") == "application/json"
+
+    def test_returns_false_on_a_non_2xx_response(self):
+        fake_response = MagicMock()
+        fake_response.status = 500
+        fake_response.__enter__.return_value = fake_response
+
+        with patch("network_scanner.urllib.request.urlopen", return_value=fake_response):
+            assert ns.send_webhook_notification("https://example.com/hook", "hello") is False
+
+    def test_returns_false_and_does_not_raise_on_network_error(self):
+        with patch("network_scanner.urllib.request.urlopen", side_effect=urllib.error.URLError("no route")):
+            assert ns.send_webhook_notification("https://example.com/hook", "hello") is False
+
+
 def _block_import(monkeypatch, blocked_name, exc):
     """Make `import <blocked_name>` raise exc, passing every other import through."""
     import builtins
