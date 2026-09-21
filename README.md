@@ -2,6 +2,10 @@
 
 Python tools for discovering devices on your local network.
 
+📄 See [`docs/network_scanner_guide.pdf`](docs/network_scanner_guide.pdf) for a
+printable setup/usage guide with pipeline diagrams and a full options
+reference for both scripts.
+
 ## Scripts
 
 ### `network_scanner.py`
