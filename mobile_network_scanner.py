@@ -452,6 +452,33 @@ def mdns_service_lookup(service_type: str, timeout: float) -> Dict[str, str]:
     instance_to_host: Dict[str, str] = {}
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        try:
+            # Service-discovery queries like this one are commonly
+            # answered via multicast even when the QU bit (see
+            # _MDNS_QU_BIT) is set: unlike a one-shot address lookup,
+            # browsing for "everything offering this service" is meant
+            # to be a shared, many-listener operation, and many
+            # responders (including, apparently, Google's Cast stack)
+            # multicast the reply regardless so every browser on the
+            # network sees it. Binding to mDNS's own port and joining
+            # its multicast group lets us receive that multicast reply,
+            # not just a unicast one.
+            sock.bind(("", _MDNS_GROUP[1]))
+            join_request = struct.pack("4sl", socket.inet_aton(_MDNS_GROUP[0]), socket.INADDR_ANY)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, join_request)
+        except OSError:
+            # Binding to port 5353 or joining the multicast group can
+            # fail - e.g. another process already owns the port without
+            # SO_REUSEPORT support, or a sandboxed environment (iOS)
+            # restricts it for third-party apps. Fall back to an
+            # ordinary ephemeral-port socket relying solely on the QU
+            # bit for a unicast reply, same as mdns_reverse_lookup() -
+            # worse odds, but still better than giving up outright.
+            pass
+
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
         try:
             sock.sendto(query, _MDNS_GROUP)

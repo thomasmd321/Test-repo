@@ -93,7 +93,15 @@ python mobile_network_scanner.py --mdns-timeout 0.5
 Note: this is a *best-effort* implementation, not a full mDNS/DNS-SD
 stack — it sends one query per method and reads whatever comes back
 within the timeout, which is enough for most devices but won't work
-through mDNS reflectors/VLANs that don't forward multicast traffic.
+through mDNS reflectors/VLANs that don't forward multicast traffic. The
+Cast service-discovery query also joins the mDNS multicast group and
+binds to port 5353 (falling back to an ordinary socket if that's denied)
+since service-browsing replies are commonly sent via multicast
+regardless of the unicast-response bit a one-shot address lookup relies
+on. If Chromecast/Cast devices still show no name after all this, it's
+worth checking whether "Local Network" permission is actually granted to
+your terminal app (Settings → Privacy & Security → Local Network) — some
+sandboxes silently drop this kind of traffic without it.
 
 **Running on iPhone:** install [a-Shell](https://apps.apple.com/us/app/a-shell/id1473805438)
 from the App Store (not "a-Shell mini," which strips out `git`), then either

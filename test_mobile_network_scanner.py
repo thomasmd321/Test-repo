@@ -236,6 +236,35 @@ class TestMdnsServiceLookup:
         with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
             assert ms.mdns_service_lookup("_googlecast._tcp.local", timeout=0.5) == {}
 
+    def test_binds_to_mdns_port_and_joins_the_multicast_group(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recvfrom.side_effect = socket.timeout
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            ms.mdns_service_lookup("_googlecast._tcp.local", timeout=0.01)
+
+        fake_sock.bind.assert_called_once_with(("", 5353))
+        join_call = next(
+            call for call in fake_sock.setsockopt.call_args_list if call.args[0:2] == (socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP)
+        )
+        assert join_call.args[2] == struct.pack("4sl", socket.inet_aton("224.0.0.251"), socket.INADDR_ANY)
+
+    def test_still_queries_when_bind_or_group_join_fails(self):
+        # A sandboxed environment (iOS) may refuse the bind/join - the
+        # lookup should still send its query and listen on whatever
+        # ordinary ephemeral-port socket resulted, rather than giving up.
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.bind.side_effect = OSError("Address already in use")
+        fake_sock.recvfrom.side_effect = socket.timeout
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            result = ms.mdns_service_lookup("_googlecast._tcp.local", timeout=0.01)
+
+        assert result == {}
+        fake_sock.sendto.assert_called_once()
+
 
 class TestMdnsReverseLookup:
     def test_returns_hostname_from_first_matching_response(self):
