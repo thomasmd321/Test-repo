@@ -49,6 +49,7 @@ Usage:
 """
 
 import argparse
+import csv
 import ipaddress
 import json
 import os
@@ -1129,6 +1130,52 @@ def _colorize(text: str, color: str, enabled: bool) -> str:
     return f"{_ANSI_CODES[color]}{text}{_ANSI_CODES['reset']}"
 
 
+# --- Exporting results to CSV/JSON ---
+
+# Columns written by --output, in order for CSV (JSON uses these same keys
+# but isn't column-ordered).
+_EXPORT_FIELDS: Tuple[str, ...] = ("ip", "hostname", "port", "banner", "risky_ports")
+
+
+def _export_json(devices: List[Device], path: Path) -> None:
+    """Write devices to path as a JSON array, one object per device."""
+    path.write_text(json.dumps(devices, indent=2), encoding="utf-8")
+
+
+def _export_csv(devices: List[Device], path: Path, fieldnames: Sequence[str]) -> None:
+    """Write devices to path as CSV, one row per device.
+
+    A list value (risky_ports) is flattened to a ";"-separated string,
+    since a CSV cell can't hold a real list.
+    """
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for device in devices:
+            row = {}
+            for key in fieldnames:
+                value = device.get(key)
+                if isinstance(value, list):
+                    value = ";".join(str(item) for item in value)
+                row[key] = "" if value is None else value
+            writer.writerow(row)
+
+
+def export_results(devices: List[Device], path: Path, fieldnames: Sequence[str] = _EXPORT_FIELDS) -> None:
+    """Save this scan's results to path, independent of the known-devices registry.
+
+    Args:
+        devices: This scan's results, exactly as printed in the results table.
+        path: Where to write. Format is chosen by the extension: ".csv"
+            writes CSV, anything else (typically ".json") writes JSON.
+        fieldnames: Which Device keys to include, and in what order for CSV.
+    """
+    if path.suffix.lower() == ".csv":
+        _export_csv(devices, path, fieldnames)
+    else:
+        _export_json(devices, path)
+
+
 def main() -> None:
     """CLI entry point: parse arguments, run the scan, and print a results table."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1176,6 +1223,13 @@ def main() -> None:
         "--no-color",
         action="store_true",
         help="Disable ANSI color in the output (also respects the NO_COLOR env var, and auto-disables when stdout isn't a terminal)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Save this scan's results to FILE, independent of the known-devices registry - JSON, or CSV if FILE ends in .csv",
     )
     args = parser.parse_args()
 
@@ -1319,6 +1373,10 @@ def main() -> None:
             print("\nWhy these are flagged:")
             for port in sorted(all_risky_ports):
                 print(f"  {port:<6} {RISKY_PORTS[port]}")
+
+        if args.output:
+            export_results(devices, Path(args.output))
+            print(f"\nWrote {len(devices)} device(s) to {args.output}.")
 
     if args.watch:
         print(f"Watch mode: rescanning every {args.watch:g}s (Ctrl+C to stop).")

@@ -12,11 +12,23 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       - Optionally support email (needs SMTP config) or a desktop
         notification (needs a platform-specific library) as alternatives.
 
-- [ ] **Export scan results to CSV/JSON.** A `--output results.json` (or
+- [x] **Export scan results to CSV/JSON.** A `--output results.json` (or
       `.csv`) flag to save each scan's results to a file, so they can be
       diffed with other tools or kept as a paper trail over time,
       independent of the known-devices registry already used for NEW
       markers.
+      Done: `export_results()`/`_export_json()`/`_export_csv()` in both
+      scripts, plus `--output FILE`. Format is chosen by FILE's
+      extension (`.csv` for CSV, anything else - typically `.json` -
+      for JSON), rather than a separate `--format` flag, since the
+      extension already says which one you want. A list field
+      (`risky_ports`) is flattened to a `;`-separated string for CSV
+      (real cells can't hold a list) but stays a proper array in JSON.
+      Each run overwrites FILE with a snapshot of that scan alone - not
+      an appended history log (see "Scan history log" below, which
+      would build on this). Verified end-to-end through the actual
+      `main()` CLI path against a real loopback listener, for both
+      formats, on both scripts.
 
 - [x] **Port-change detection on known devices.** The known-devices
       registry already stores each device's last-matched port/hostname -

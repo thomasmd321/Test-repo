@@ -4,7 +4,9 @@ Python tools for discovering devices on your local network.
 
 📄 See [`docs/network_scanner_guide.pdf`](docs/network_scanner_guide.pdf) for a
 printable setup/usage guide with pipeline diagrams and a full options
-reference for both scripts.
+reference for both scripts. It's a generated file — see
+[`docs/pdf_guide/`](docs/pdf_guide/) for the script that builds it (only
+needed if you're updating the guide itself, not for using either scanner).
 
 ## Scripts
 
@@ -324,6 +326,25 @@ python mobile_network_scanner.py --watch 300
 The very first run (or right after `--forget-known-devices`) will mark
 every device `NEW`, since nothing has been seen before yet — that's
 expected, not a bug.
+
+## Exporting results
+
+Both scripts can save a scan's results to a file with `--output FILE`,
+independent of the known-devices registry above — useful for feeding
+results into another tool, diffing two scans by hand, or just keeping a
+record. The format is chosen by the extension: `.csv` writes CSV, anything
+else (typically `.json`) writes JSON.
+
+```
+python network_scanner.py --output scan.json
+python network_scanner.py --output scan.csv
+python mobile_network_scanner.py --output scan.json
+```
+
+Each run overwrites `FILE` with that scan's results — it's a snapshot of
+the latest scan, not an appended history log. A CSV's `risky_ports` column
+is `;`-separated (e.g. `23;445`) since a CSV cell can't hold a real list;
+the JSON export keeps it as a proper array.
 
 ## Tests
 

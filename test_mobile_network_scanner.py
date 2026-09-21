@@ -1,3 +1,5 @@
+import csv
+import json
 import socket
 import struct
 from unittest.mock import MagicMock, patch
@@ -202,6 +204,61 @@ class TestColorize:
 
     def test_returns_plain_text_when_disabled(self):
         assert ms._colorize("NEW", "green", enabled=False) == "NEW"
+
+
+class TestExportResults:
+    def test_writes_json_by_default(self, tmp_path):
+        path = tmp_path / "scan.json"
+        devices = [{"ip": "192.168.1.1", "hostname": "router.local", "port": 80, "banner": "", "risky_ports": []}]
+
+        ms.export_results(devices, path)
+
+        assert json.loads(path.read_text(encoding="utf-8")) == devices
+
+    def test_writes_json_for_an_unrecognized_extension(self, tmp_path):
+        path = tmp_path / "scan.txt"
+        devices = [{"ip": "192.168.1.1", "hostname": "", "port": 80, "banner": "", "risky_ports": []}]
+
+        ms.export_results(devices, path)
+
+        assert json.loads(path.read_text(encoding="utf-8")) == devices
+
+    def test_writes_csv_when_path_ends_in_dot_csv(self, tmp_path):
+        path = tmp_path / "scan.csv"
+        devices = [{
+            "ip": "192.168.1.1", "hostname": "router.local", "port": 80,
+            "banner": "Server: nginx", "risky_ports": [23, 445],
+        }]
+
+        ms.export_results(devices, path)
+
+        with path.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+
+        assert rows == [{
+            "ip": "192.168.1.1", "hostname": "router.local", "port": "80",
+            "banner": "Server: nginx", "risky_ports": "23;445",
+        }]
+
+    def test_csv_uses_empty_string_for_empty_risky_ports(self, tmp_path):
+        path = tmp_path / "scan.csv"
+        devices = [{"ip": "192.168.1.1", "hostname": "", "port": 80, "banner": "", "risky_ports": []}]
+
+        ms.export_results(devices, path)
+
+        with path.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+
+        assert rows[0]["risky_ports"] == ""
+
+    def test_csv_column_order_matches_fieldnames(self, tmp_path):
+        path = tmp_path / "scan.csv"
+        devices = [{"ip": "192.168.1.1", "hostname": "", "port": 80, "banner": "", "risky_ports": []}]
+
+        ms.export_results(devices, path)
+
+        header = path.read_text(encoding="utf-8").splitlines()[0]
+        assert header == "ip,hostname,port,banner,risky_ports"
 
 
 class TestDnsNameEncoding:
