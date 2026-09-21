@@ -1,9 +1,11 @@
 import csv
+import ipaddress
 import json
 import socket
 import struct
 import subprocess
 import sys
+import time
 import types
 import urllib.error
 from unittest.mock import MagicMock, patch
@@ -119,6 +121,24 @@ class TestScanAllSubnets:
             assert ns.scan_all_subnets([], timeout=1.0) == []
         mock_scan.assert_not_called()
 
+    def test_drops_excluded_devices_before_vendor_lookup_and_port_scanning(self):
+        devices = [
+            {"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""},
+            {"ip": "192.168.1.50", "mac": "11:22:33:44:55:66", "hostname": ""},
+        ]
+        patch_hostnames, patch_vendors = self._patch_enrichment()
+        with patch("network_scanner.scan", return_value=devices), patch_hostnames, patch_vendors, \
+                patch("network_scanner._attach_open_ports", side_effect=lambda d, *a, **k: d) as mock_attach_ports:
+            result = ns.scan_all_subnets(
+                ["192.168.1.0/24"], timeout=1.0, check_risky_ports=False,
+                excluded_networks=ns._parse_exclusions("192.168.1.50"),
+            )
+
+        assert [d["ip"] for d in result] == ["192.168.1.5"]
+        # The excluded device shouldn't even reach the port-scan step.
+        mock_attach_ports.assert_called_once()
+        assert [d["ip"] for d in mock_attach_ports.call_args[0][0]] == ["192.168.1.5"]
+
     def test_resolves_hostnames_once_per_subnet_before_merging(self):
         devices_by_subnet = {
             "192.168.1.0/24": [{"ip": "192.168.1.5", "mac": "", "hostname": ""}],
@@ -228,6 +248,49 @@ class TestScanAllSubnets:
 
         mock_ports.assert_not_called()
         mock_risky.assert_not_called()
+
+    def test_scan_all_subnets_runs_subnets_concurrently(self):
+        """Proves scan_one_subnet() futures actually run in parallel, not
+        one-at-a-time: four subnets each 'take' 0.2s via a mocked scan(), so
+        a sequential loop would take >= 0.8s while running them concurrently
+        (max_subnet_workers=4) should take roughly one subnet's worth of
+        time. This only exercises the ThreadPoolExecutor/as_completed
+        mechanics and the merge - it can't verify scapy's own thread-safety
+        under real concurrent ARP scans (see this function's docstring)."""
+        subnets = ["10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+
+        def fake_scan(subnet, timeout):
+            time.sleep(0.2)
+            last_octet = subnet.split(".")[2]
+            return [{"ip": f"10.0.{last_octet}.5", "mac": "", "hostname": ""}]
+
+        patch_hostnames, patch_vendors = self._patch_enrichment()
+        with patch("network_scanner.scan", side_effect=fake_scan), patch_hostnames, patch_vendors:
+            start = time.monotonic()
+            devices = ns.scan_all_subnets(subnets, timeout=1.0, scan_ports=False, max_subnet_workers=4)
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 0.6, f"expected concurrent scans to take well under {len(subnets) * 0.2}s, took {elapsed}s"
+        assert [d["ip"] for d in devices] == ["10.0.0.5", "10.0.1.5", "10.0.2.5", "10.0.3.5"]
+
+    def test_max_subnet_workers_limits_concurrency(self):
+        """With only 1 worker for 3 subnets, scans should serialize - this
+        is the inverse check of the concurrency test above, confirming
+        max_subnet_workers is actually respected rather than always maxing
+        out at the ThreadPoolExecutor's own default."""
+        subnets = ["10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24"]
+
+        def fake_scan(subnet, timeout):
+            time.sleep(0.15)
+            return []
+
+        patch_hostnames, patch_vendors = self._patch_enrichment()
+        with patch("network_scanner.scan", side_effect=fake_scan), patch_hostnames, patch_vendors:
+            start = time.monotonic()
+            ns.scan_all_subnets(subnets, timeout=1.0, scan_ports=False, max_subnet_workers=1)
+            elapsed = time.monotonic() - start
+
+        assert elapsed >= 0.45, f"expected serialized scans (1 worker) to take >= 0.45s, took {elapsed}s"
 
 
 class TestProbeOpenPort:
@@ -376,6 +439,67 @@ class TestExportResults:
 
         header = path.read_text(encoding="utf-8").splitlines()[0]
         assert header == "ip,mac,hostname,vendor,port,risky_ports"
+
+
+class TestAppendScanHistory:
+    def test_appends_one_json_line_per_call(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}]
+
+        ns.append_scan_history(devices, path)
+        ns.append_scan_history(devices, path)
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+
+    def test_each_line_records_devices_and_a_timestamp(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}]
+
+        ns.append_scan_history(devices, path)
+
+        entry = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["devices"] == devices
+        assert "timestamp" in entry
+
+    def test_logs_an_empty_scan_too(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+
+        ns.append_scan_history([], path)
+
+        entry = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["devices"] == []
+
+    def test_creates_parent_directories(self, tmp_path):
+        path = tmp_path / "nested" / "history.jsonl"
+
+        ns.append_scan_history([], path)
+
+        assert path.exists()
+
+    def test_does_not_raise_when_directory_creation_fails(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        with patch("network_scanner.Path.mkdir", side_effect=OSError("Permission denied")):
+            ns.append_scan_history([], path)  # Should not raise.
+
+    def test_trims_oldest_entries_once_over_the_cap(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        for i in range(5):
+            ns.append_scan_history([{"ip": f"192.168.1.{i}"}], path, max_entries=3)
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3
+        kept_ips = [json.loads(line)["devices"][0]["ip"] for line in lines]
+        assert kept_ips == ["192.168.1.2", "192.168.1.3", "192.168.1.4"]
+
+    def test_does_not_rewrite_the_file_while_under_the_cap(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        ns.append_scan_history([{"ip": "192.168.1.1"}], path, max_entries=200)
+
+        with patch("network_scanner.Path.write_text") as mock_write_text:
+            ns.append_scan_history([{"ip": "192.168.1.2"}], path, max_entries=200)
+
+        mock_write_text.assert_not_called()
 
 
 class TestBuildNotificationMessage:
@@ -1626,6 +1750,48 @@ class TestFindMissingDevices:
         missing = ns._find_missing_devices([], known_devices_path=path)
 
         assert [entry["key"] for entry in missing] == ["aa:aa:aa:aa:aa:aa", "cc:cc:cc:cc:cc:cc"]
+
+
+class TestParseExclusions:
+    def test_treats_a_bare_ip_as_a_slash_32(self):
+        networks = ns._parse_exclusions("192.168.1.50")
+        assert networks == [ipaddress.ip_network("192.168.1.50/32")]
+
+    def test_parses_a_cidr_range_as_is(self):
+        networks = ns._parse_exclusions("192.168.1.64/28")
+        assert networks == [ipaddress.ip_network("192.168.1.64/28")]
+
+    def test_parses_multiple_comma_separated_entries(self):
+        networks = ns._parse_exclusions("192.168.1.50, 192.168.1.64/28")
+        assert networks == [
+            ipaddress.ip_network("192.168.1.50/32"),
+            ipaddress.ip_network("192.168.1.64/28"),
+        ]
+
+    def test_ignores_blank_entries(self):
+        networks = ns._parse_exclusions("192.168.1.50,,")
+        assert networks == [ipaddress.ip_network("192.168.1.50/32")]
+
+    def test_raises_value_error_for_garbage_input(self):
+        with pytest.raises(ValueError):
+            ns._parse_exclusions("not-an-ip")
+
+
+class TestIsExcluded:
+    def test_true_for_an_excluded_bare_ip(self):
+        networks = ns._parse_exclusions("192.168.1.50")
+        assert ns._is_excluded("192.168.1.50", networks) is True
+
+    def test_true_for_an_ip_inside_an_excluded_range(self):
+        networks = ns._parse_exclusions("192.168.1.64/28")
+        assert ns._is_excluded("192.168.1.70", networks) is True
+
+    def test_false_for_an_ip_outside_every_excluded_network(self):
+        networks = ns._parse_exclusions("192.168.1.50,192.168.1.64/28")
+        assert ns._is_excluded("192.168.1.99", networks) is False
+
+    def test_false_when_no_networks_are_excluded(self):
+        assert ns._is_excluded("192.168.1.1", []) is False
 
 
 class TestSetLabel:

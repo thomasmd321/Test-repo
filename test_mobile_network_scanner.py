@@ -1,4 +1,5 @@
 import csv
+import ipaddress
 import json
 import socket
 import struct
@@ -260,6 +261,67 @@ class TestExportResults:
 
         header = path.read_text(encoding="utf-8").splitlines()[0]
         assert header == "ip,hostname,port,banner,risky_ports"
+
+
+class TestAppendScanHistory:
+    def test_appends_one_json_line_per_call(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        devices = [{"ip": "192.168.1.1", "hostname": "", "port": 80, "banner": "", "risky_ports": []}]
+
+        ms.append_scan_history(devices, path)
+        ms.append_scan_history(devices, path)
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 2
+
+    def test_each_line_records_devices_and_a_timestamp(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        devices = [{"ip": "192.168.1.1", "hostname": "", "port": 80, "banner": "", "risky_ports": []}]
+
+        ms.append_scan_history(devices, path)
+
+        entry = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["devices"] == devices
+        assert "timestamp" in entry
+
+    def test_logs_an_empty_scan_too(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+
+        ms.append_scan_history([], path)
+
+        entry = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+        assert entry["devices"] == []
+
+    def test_creates_parent_directories(self, tmp_path):
+        path = tmp_path / "nested" / "history.jsonl"
+
+        ms.append_scan_history([], path)
+
+        assert path.exists()
+
+    def test_does_not_raise_when_directory_creation_fails(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        with patch("mobile_network_scanner.Path.mkdir", side_effect=OSError("Permission denied")):
+            ms.append_scan_history([], path)  # Should not raise.
+
+    def test_trims_oldest_entries_once_over_the_cap(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        for i in range(5):
+            ms.append_scan_history([{"ip": f"192.168.1.{i}"}], path, max_entries=3)
+
+        lines = path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 3
+        kept_ips = [json.loads(line)["devices"][0]["ip"] for line in lines]
+        assert kept_ips == ["192.168.1.2", "192.168.1.3", "192.168.1.4"]
+
+    def test_does_not_rewrite_the_file_while_under_the_cap(self, tmp_path):
+        path = tmp_path / "history.jsonl"
+        ms.append_scan_history([{"ip": "192.168.1.1"}], path, max_entries=200)
+
+        with patch("mobile_network_scanner.Path.write_text") as mock_write_text:
+            ms.append_scan_history([{"ip": "192.168.1.2"}], path, max_entries=200)
+
+        mock_write_text.assert_not_called()
 
 
 class TestBuildNotificationMessage:
@@ -746,6 +808,27 @@ class TestTcpScan:
         assert ips == sorted(ips, key=lambda ip: tuple(int(p) for p in ip.split(".")))
         assert set(ips) == {"192.168.1.2", "192.168.1.10"}
 
+    def test_excluded_hosts_are_never_probed_at_all(self):
+        probed_ips = []
+
+        def fake_probe(ip, ports, timeout):
+            probed_ips.append(ip)
+            return 80
+
+        with patch("mobile_network_scanner.probe_host", side_effect=fake_probe), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
+                patch("mobile_network_scanner._resolve_hostname", return_value=""):
+            devices = ms.tcp_scan(
+                "192.168.1.0/29", timeout=0.1, max_workers=8,
+                excluded_networks=ms._parse_exclusions("192.168.1.1,192.168.1.2"),
+            )
+
+        assert "192.168.1.1" not in probed_ips
+        assert "192.168.1.2" not in probed_ips
+        assert "192.168.1.1" not in [d["ip"] for d in devices]
+        assert "192.168.1.2" not in [d["ip"] for d in devices]
+
     def test_attaches_hostname_and_matched_port_when_available(self):
         # Port 80, not 8009 (the Chromecast port), so this doesn't also
         # trigger the Cast-service-discovery path - see TestTcpScan's
@@ -886,7 +969,7 @@ class TestTcpScan:
 
 class TestScanAllSubnets:
     def test_merges_devices_from_every_subnet(self):
-        def fake_tcp_scan(subnet, timeout, ports, max_workers, mdns_timeout, grab_banners, check_risky_ports):
+        def fake_tcp_scan(subnet, timeout, ports, max_workers, mdns_timeout, grab_banners, check_risky_ports, excluded_networks):
             return {
                 "192.168.1.0/24": [
                     {"ip": "192.168.1.5", "hostname": "", "port": 80, "banner": "", "risky_ports": []}
@@ -1050,6 +1133,48 @@ class TestFindMissingDevices:
         missing = ms._find_missing_devices([], known_devices_path=path)
 
         assert [entry["key"] for entry in missing] == ["192.168.1.2", "192.168.1.9"]
+
+
+class TestParseExclusions:
+    def test_treats_a_bare_ip_as_a_slash_32(self):
+        networks = ms._parse_exclusions("192.168.1.50")
+        assert networks == [ipaddress.ip_network("192.168.1.50/32")]
+
+    def test_parses_a_cidr_range_as_is(self):
+        networks = ms._parse_exclusions("192.168.1.64/28")
+        assert networks == [ipaddress.ip_network("192.168.1.64/28")]
+
+    def test_parses_multiple_comma_separated_entries(self):
+        networks = ms._parse_exclusions("192.168.1.50, 192.168.1.64/28")
+        assert networks == [
+            ipaddress.ip_network("192.168.1.50/32"),
+            ipaddress.ip_network("192.168.1.64/28"),
+        ]
+
+    def test_ignores_blank_entries(self):
+        networks = ms._parse_exclusions("192.168.1.50,,")
+        assert networks == [ipaddress.ip_network("192.168.1.50/32")]
+
+    def test_raises_value_error_for_garbage_input(self):
+        with pytest.raises(ValueError):
+            ms._parse_exclusions("not-an-ip")
+
+
+class TestIsExcluded:
+    def test_true_for_an_excluded_bare_ip(self):
+        networks = ms._parse_exclusions("192.168.1.50")
+        assert ms._is_excluded("192.168.1.50", networks) is True
+
+    def test_true_for_an_ip_inside_an_excluded_range(self):
+        networks = ms._parse_exclusions("192.168.1.64/28")
+        assert ms._is_excluded("192.168.1.70", networks) is True
+
+    def test_false_for_an_ip_outside_every_excluded_network(self):
+        networks = ms._parse_exclusions("192.168.1.50,192.168.1.64/28")
+        assert ms._is_excluded("192.168.1.99", networks) is False
+
+    def test_false_when_no_networks_are_excluded(self):
+        assert ms._is_excluded("192.168.1.1", []) is False
 
 
 class TestSetLabel:

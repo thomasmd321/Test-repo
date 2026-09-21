@@ -384,10 +384,14 @@ def build_pdf(desktop_diagram: Path, mobile_diagram: Path, terminal_mockup: Path
         crow("Risky-port flagging", "Yes", "Yes"),
         crow("NEW / CHG / missing tracking", "Yes", "Yes"),
         crow("Export results", "--output FILE (CSV/JSON)", "--output FILE (CSV/JSON)"),
+        crow("Scan history log", "--log-history FILE", "--log-history FILE"),
+        crow("Excluding hosts", "--exclude IP/CIDR", "--exclude IP/CIDR"),
         crow("Custom device labels", "--set-label / --remove-label", "--set-label / --remove-label"),
         crow("Environment diagnostics", "--doctor", "--doctor"),
         crow("Quiet mode (cron/systemd)", "--quiet", "--quiet"),
         crow("Webhook notifications", "--notify-webhook", "--notify-webhook"),
+        crow("Multi-subnet scanning", "--all-subnets (parallel)", "Manual comma-separated list"),
+        crow("Shell tab-completion", "completions.bash", "completions.bash"),
     ]
     ct = Table(compare_data, colWidths=[1.5 * inch, 2.5 * inch, 2.5 * inch])
     ct_style = [
@@ -460,7 +464,7 @@ python3 network_scanner.py --output scan.json  # save results to a file"""))
     story.append(Paragraph("Options", styles["H2"]))
     desktop_flags = [
         ("subnet", "Positional. CIDR range(s) to scan, comma-separated for more than one. Auto-detected if omitted."),
-        ("--all-subnets", "Scan every local subnet this machine has an interface on (requires <font face=\"Courier\">pip install psutil</font>) instead of just the default route."),
+        ("--all-subnets", "Scan every local subnet this machine has an interface on (requires <font face=\"Courier\">pip install psutil</font>) instead of just the default route. Subnets are scanned concurrently, not one at a time, so several VLANs don't multiply the wall-clock cost."),
         ("--identify IP", "Skip the network scan; do a slow, thorough single-host investigation instead (more ports, banner grabs, full hostname/vendor resolution)."),
         ("--doctor", "Skip the network scan; check this environment for everything this script can use (scapy, ping/arp, cache writability, mDNS, etc.) and report it."),
         ("--timeout SECONDS", "Timeout per host (default: 1.0)."),
@@ -476,10 +480,13 @@ python3 network_scanner.py --output scan.json  # save results to a file"""))
         ("--ipv6-timeout SECONDS", "Roughly how long to spend on IPv6 discovery (default: 2.0)."),
         ("--no-scan-ports", "Skip the open-port probe (and the risky-ports check that depends on it)."),
         ("--ports LIST", "Comma-separated TCP ports to probe instead of the built-in default list."),
+        ("--exclude LIST", "Comma-separated IPs and/or CIDR ranges to drop from the scan right after discovery (a bare IP is treated as a /32)."),
         ("--port-timeout SECONDS", "Per-port connection timeout, for both the port probe and risky-ports check (default: 0.3)."),
         ("--no-risky-ports", "Skip the risky-ports security check while keeping the general port probe."),
         ("--no-color", "Disable ANSI color output (also respects the <font face=\"Courier\">NO_COLOR</font> env var)."),
         ("--output FILE", "Save this scan's results to FILE as JSON, or CSV if it ends in <font face=\"Courier\">.csv</font>."),
+        ("--log-history FILE", "Append this scan's results as one JSON line to FILE, instead of overwriting it like --output does."),
+        ("--history-max-entries N", "Cap FILE from --log-history at N lines, dropping the oldest first (default: 200)."),
         ("--quiet", "Print nothing for a scan with no NEW/CHG/missing/risky devices - only an interesting run produces output (see --watch under cron/systemd)."),
         ("--notify-webhook URL", "POST a summary to URL as Slack-compatible JSON whenever a scan has something to report - same trigger as --quiet."),
     ]
@@ -512,6 +519,7 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
         ("--doctor", "Skip the network scan; check this environment for everything this script can use (subnet detection, TCP connectivity, cache writability, mDNS) and report it."),
         ("--timeout SECONDS", "Timeout per port probe (default: 0.5); also used for the banner-grab and risky-ports steps."),
         ("--ports LIST", "Comma-separated TCP ports to probe instead of the built-in default list."),
+        ("--exclude LIST", "Comma-separated IPs and/or CIDR ranges to drop before probing anything (a bare IP is treated as a /32)."),
         ("--mdns-timeout SECONDS", "Timeout for the mDNS/Bonjour hostname fallback (default: 0.3)."),
         ("--watch SECONDS", "Rescan on a timer instead of once, printing NEW markers as they appear (Ctrl+C to stop)."),
         ("--no-track-devices", "Don't use the known-devices registry at all — no NEW/CHG markers, nothing remembered."),
@@ -522,6 +530,8 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
         ("--no-risky-ports", "Skip the risky-ports security check while keeping the general port probe."),
         ("--no-color", "Disable ANSI color output (also respects the <font face=\"Courier\">NO_COLOR</font> env var)."),
         ("--output FILE", "Save this scan's results to FILE as JSON, or CSV if it ends in <font face=\"Courier\">.csv</font>."),
+        ("--log-history FILE", "Append this scan's results as one JSON line to FILE, instead of overwriting it like --output does."),
+        ("--history-max-entries N", "Cap FILE from --log-history at N lines, dropping the oldest first (default: 200)."),
         ("--quiet", "Print nothing for a scan with no NEW/CHG/missing/risky devices - only an interesting run produces output (see --watch under cron/systemd)."),
         ("--notify-webhook URL", "POST a summary to URL as Slack-compatible JSON whenever a scan has something to report - same trigger as --quiet."),
     ]
@@ -704,6 +714,70 @@ python3 mobile_network_scanner.py --watch 300 \\
         "service's exact payload shape; a target expecting something else (Discord's content "
         "key, ntfy.sh's plain-text body) may need a small relay in between, or just point it at "
         "a service that already speaks the Slack-compatible format.", styles["Body"]))
+
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ Excluding devices
+    story.append(Paragraph("9. Excluding devices from a scan", styles["H1"]))
+    story.append(Paragraph(
+        "--exclude IP/CIDR skips one or more addresses — comma-separated, each either a bare IP "
+        "(treated as a /32) or a CIDR range — from the rest of a scan, without narrowing the "
+        "whole subnet just to dodge one host: a printer that crashes under port probes, a NAS "
+        "you don't want woken from sleep, or a noisy neighbor you just don't care about.",
+        styles["Body"]))
+    story.append(code_block("""python3 network_scanner.py --exclude 192.168.1.5
+python3 network_scanner.py --exclude 192.168.1.5,192.168.1.10
+python3 network_scanner.py --exclude 192.168.1.0/28
+python3 mobile_network_scanner.py --exclude 192.168.1.5,10.0.0.0/24"""))
+    story.append(Paragraph(
+        "On mobile_network_scanner.py, exclusion is complete: excluded hosts are dropped from "
+        "the list before any TCP connection is ever attempted, so nothing at all reaches them. "
+        "On network_scanner.py's ARP path, the initial ARP broadcast still reaches every host on "
+        "the subnet — scapy's srp() sends one request across the whole range in a single call, "
+        "with no way to carve individual addresses out of that broadcast — but excluded devices "
+        "are dropped immediately after discovery, before vendor lookup, port scanning, the "
+        "risky-ports check, and the final report/export/tracking, so in practice they're never "
+        "touched beyond that one broadcast packet. The ping-sweep fallback still pings every "
+        "host itself and filters after, since it has no equivalent single-broadcast step to "
+        "route around.", styles["Body"]))
+
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ Scan history log
+    story.append(Paragraph("10. Scan history log", styles["H1"]))
+    story.append(Paragraph(
+        "--log-history FILE appends every scan's results to FILE as one JSON line per run "
+        "({\"timestamp\": \"...\", \"devices\": [...]}), instead of overwriting it like --output "
+        "does — useful under --watch for keeping a record of what the network looked like over "
+        "time, or for feeding into your own analysis later (each line parses independently, so "
+        "you don't need to load the whole file to read one entry).", styles["Body"]))
+    story.append(code_block("""python3 network_scanner.py --watch 300 --log-history history.jsonl
+python3 mobile_network_scanner.py --log-history history.jsonl"""))
+    story.append(Paragraph(
+        "The file is capped at 200 entries by default (oldest dropped first) so it doesn't grow "
+        "forever under a long-running --watch; override with --history-max-entries N.",
+        styles["Body"]))
+    story.append(code_block(
+        """python3 network_scanner.py --watch 300 --log-history history.jsonl \\\n"""
+        """  --history-max-entries 1000"""))
+
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ Shell completion
+    story.append(Paragraph("11. Shell tab-completion", styles["H1"]))
+    story.append(Paragraph(
+        "completions.bash adds bash tab-completion for each script's flag names (18+ per script "
+        "by now, easy to half-remember). Source it from your ~/.bashrc:", styles["Body"]))
+    story.append(code_block("source /path/to/Test-repo/completions.bash"))
+    story.append(Paragraph(
+        "It only completes flag <i>names</i>, not their arguments (a subnet, a port list, a file "
+        "path), and only fires for a direct invocation matching a script's own name "
+        "(<font face='Courier'>./network_scanner.py</font>, or the bare name if it's on PATH — "
+        "the scripts in this repo already have their executable bit set). "
+        "<font face='Courier'>python3 network_scanner.py &lt;TAB&gt;</font> does <b>not</b> "
+        "trigger it: bash keys completion off the first word of the command line, which is "
+        "<font face='Courier'>python3</font> in that case, not the script — putting the script "
+        "on PATH so the bare-name form works is the practical fix.", styles["Body"]))
 
     doc = SimpleDocTemplate(
         str(out_path),

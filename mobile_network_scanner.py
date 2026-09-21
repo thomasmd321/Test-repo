@@ -760,6 +760,7 @@ def tcp_scan(
     mdns_timeout: float = 0.3,
     grab_banners: bool = True,
     check_risky_ports: bool = True,
+    excluded_networks: Sequence["ipaddress._BaseNetwork"] = (),
 ) -> List[Device]:
     """Discover devices by probing common TCP ports across every host in subnet.
 
@@ -789,6 +790,11 @@ def tcp_scan(
             (telnet) open would otherwise never reveal the telnet port
             if 80 happened to be checked first. On by default; turn off
             for a faster scan.
+        excluded_networks: Hosts matching one of these (see
+            _parse_exclusions()) are dropped before any probing at all -
+            no TCP connection is ever attempted against them, unlike
+            network_scanner.py's ARP-broadcast case, since this script
+            already probes each host individually.
 
     Returns:
         Discovered devices sorted by IP address, each with "hostname"
@@ -806,6 +812,8 @@ def tcp_scan(
     # .hosts() excludes the network and broadcast addresses, since those
     # aren't assignable to real devices.
     hosts = list(network.hosts())
+    if excluded_networks:
+        hosts = [ip for ip in hosts if not _is_excluded(str(ip), excluded_networks)]
 
     # Maps each live host to the port that answered, so tcp_scan() can
     # report it alongside the hostname - a useful fingerprint for devices
@@ -909,6 +917,7 @@ def scan_all_subnets(
     mdns_timeout: float = 0.3,
     grab_banners: bool = True,
     check_risky_ports: bool = True,
+    excluded_networks: Sequence["ipaddress._BaseNetwork"] = (),
 ) -> List[Device]:
     """Run tcp_scan() over multiple subnets and merge the results into one list.
 
@@ -920,6 +929,7 @@ def scan_all_subnets(
         mdns_timeout: Passed through to tcp_scan() for each subnet.
         grab_banners: Passed through to tcp_scan() for each subnet.
         check_risky_ports: Passed through to tcp_scan() for each subnet.
+        excluded_networks: Passed through to tcp_scan() for each subnet.
 
     Returns:
         Every discovered device across all subnets, sorted by IP and
@@ -938,6 +948,7 @@ def scan_all_subnets(
             mdns_timeout=mdns_timeout,
             grab_banners=grab_banners,
             check_risky_ports=check_risky_ports,
+            excluded_networks=excluded_networks,
         ):
             devices_by_ip[device["ip"]] = device
 
@@ -1088,6 +1099,43 @@ def _find_missing_devices(devices: List[Device], known_devices_path: Path = _KNO
 
     missing = [dict(entry, key=key) for key, entry in known.items() if key not in current_keys]
     return sorted(missing, key=lambda entry: entry["key"])
+
+
+# --- Exclusion filtering (--exclude) ---
+#
+# Skip specific hosts from being probed at all - a fragile device that
+# crashes under port probes, or one you don't want woken from sleep -
+# without narrowing the whole subnet just to dodge one host.
+
+def _parse_exclusions(spec: str) -> List["ipaddress._BaseNetwork"]:
+    """Parse --exclude's comma-separated IP/CIDR list into networks.
+
+    Args:
+        spec: e.g. "192.168.1.50,192.168.1.64/28".
+
+    Returns:
+        One network per entry. A bare IP (no "/") is treated as a /32 -
+        excluding just that one address - so CIDR notation is only
+        needed for an actual range.
+
+    Raises:
+        ValueError: an entry isn't a valid IP or CIDR range.
+    """
+    networks = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "/" not in part:
+            part = f"{part}/32"
+        networks.append(ipaddress.ip_network(part, strict=False))
+    return networks
+
+
+def _is_excluded(ip: str, excluded_networks: Sequence["ipaddress._BaseNetwork"]) -> bool:
+    """Return True if ip falls inside any of excluded_networks."""
+    address = ipaddress.ip_address(ip)
+    return any(address in network for network in excluded_networks)
 
 
 # --- Custom device labels/aliases ---
@@ -1247,6 +1295,69 @@ def export_results(devices: List[Device], path: Path, fieldnames: Sequence[str] 
         _export_csv(devices, path, fieldnames)
     else:
         _export_json(devices, path)
+
+
+# --- Scan history log ---
+#
+# A separate concern from the known-devices registry: that registry only
+# ever holds first_seen/last_seen (the earliest and most recent sighting),
+# so "was this device here at 3pm yesterday" isn't answerable from it -
+# only every scan's own full snapshot, kept over time, can answer that.
+
+_DEFAULT_HISTORY_MAX_ENTRIES = 200
+
+
+def _trim_scan_history(path: Path, max_entries: int) -> None:
+    """Drop the oldest lines from path's history log once it exceeds max_entries.
+
+    Reads the whole file back to trim it - fine for the sizes this is
+    meant for (a few hundred scans' worth of JSON lines), and simpler
+    than maintaining a ring buffer on disk. Only rewrites when actually
+    over the cap, so a normal append_scan_history() call is just the one
+    cheap append, not a read-modify-write every time.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    if len(lines) <= max_entries:
+        return
+    try:
+        path.write_text("\n".join(lines[-max_entries:]) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def append_scan_history(
+    devices: List[Device], path: Path, max_entries: int = _DEFAULT_HISTORY_MAX_ENTRIES
+) -> None:
+    """Append this scan's results to a rolling history log at path.
+
+    One JSON object per line (JSON Lines, not a single JSON array), so
+    appending a new scan never requires reading or rewriting the whole
+    file except when trimming old entries.
+
+    Args:
+        devices: This scan's results, exactly as printed/exported -
+            logged even if empty, since "nothing was here at this
+            timestamp" is itself part of the history.
+        path: Where the history log is stored.
+        max_entries: How many scans to keep before dropping the oldest.
+
+    Failing to write (read-only filesystem, out of disk space, etc.)
+    deliberately doesn't raise - the same rule _save_known_devices()
+    follows, since losing the history log shouldn't crash the scan that
+    triggered it.
+    """
+    entry = json.dumps({"timestamp": datetime.now().isoformat(timespec="seconds"), "devices": devices})
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(entry + "\n")
+    except OSError:
+        return
+
+    _trim_scan_history(path, max_entries)
 
 
 # --- Notifications for --watch (or any run with something to report) ---
@@ -1471,6 +1582,13 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=0.5, help="Timeout in seconds per port probe (default: 0.5)")
     parser.add_argument("--ports", type=str, default=None, help="Comma-separated TCP ports to probe (default: common ports)")
     parser.add_argument(
+        "--exclude",
+        type=str,
+        default=None,
+        metavar="LIST",
+        help="Comma-separated IPs and/or CIDR ranges to skip entirely - no TCP connection is ever attempted against them (e.g. a fragile device that crashes under probes) - see _parse_exclusions()",
+    )
+    parser.add_argument(
         "--doctor",
         action="store_true",
         help="Skip the network scan and instead check this environment for everything this script can use (local subnet detection, TCP connectivity, cache writability, mDNS) - see run_doctor()",
@@ -1546,9 +1664,26 @@ def main() -> None:
         metavar="URL",
         help="POST a summary to URL as {\"text\": ...} JSON (Slack-compatible) whenever a scan has a NEW/CHG/missing/risky device to report - see send_webhook_notification()",
     )
+    parser.add_argument(
+        "--log-history",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Append every scan's results (even an empty one) to FILE as JSON Lines, independent of the known-devices registry - see append_scan_history()",
+    )
+    parser.add_argument(
+        "--history-max-entries",
+        type=int,
+        default=_DEFAULT_HISTORY_MAX_ENTRIES,
+        help=f"How many scans to keep in --log-history's log before dropping the oldest (default: {_DEFAULT_HISTORY_MAX_ENTRIES})",
+    )
     args = parser.parse_args()
 
     color = _use_color(args.no_color)
+    try:
+        excluded_networks = _parse_exclusions(args.exclude) if args.exclude else []
+    except ValueError as exc:
+        parser.error(f"--exclude: {exc}")
 
     if args.doctor:
         ok = run_doctor(color=color)
@@ -1588,7 +1723,11 @@ def main() -> None:
             mdns_timeout=args.mdns_timeout,
             grab_banners=not args.no_banners,
             check_risky_ports=not args.no_risky_ports,
+            excluded_networks=excluded_networks,
         )
+
+        if args.log_history:
+            append_scan_history(devices, Path(args.log_history), max_entries=args.history_max_entries)
 
         if not devices:
             if not args.quiet:

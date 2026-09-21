@@ -74,12 +74,91 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       reported the old→new port and left the device correctly
       unflagged as NEW.
 
-- [ ] **Scan history log.** Beyond the known-devices registry's
+- [x] **Scan history log.** Beyond the known-devices registry's
       first_seen/last_seen pair, append each scan's snapshot to a
       rolling, capped/rotated log so "when did this device actually show
       up" can be answered, not just "is it new since last time." Really
       only pays off once CSV/JSON export (above) exists to look at it;
       needs a cap/rotation policy so the log doesn't grow unbounded.
+      Done: `append_scan_history()`/`_trim_scan_history()` in both
+      scripts, plus `--log-history FILE` and `--history-max-entries N`
+      (default 200). Appends one JSON line per scan
+      (`{"timestamp": ..., "devices": [...]}`) rather than rewriting the
+      whole file every run, and only rewrites the file at all once it's
+      actually over the cap (verified with a test that patches
+      `Path.write_text` and asserts it's never called while under the
+      cap - append-only stays append-only). A failed write (unwritable
+      directory, full disk) is swallowed the same way `--output` already
+      handles export failures, rather than crashing the scan.
+
+- [x] **Parallel multi-subnet scanning.** `--all-subnets` scans each
+      subnet one at a time - for someone with several VLANs, running
+      them concurrently instead (the same `ThreadPoolExecutor` pattern
+      already used for per-host/per-port work) would cut wall-clock time
+      roughly proportional to subnet count.
+      Done: `scan_all_subnets()` (`network_scanner.py` only - the mobile
+      script has no multi-subnet auto-detection to parallelize) now runs
+      each subnet's `scan()` + hostname resolution in its own
+      `ThreadPoolExecutor` worker instead of a sequential loop, merging
+      into the final `devices_by_ip` dict only in the main thread as each
+      future completes, so nothing but the main thread ever writes to
+      it. `max_subnet_workers` (default 8) caps concurrency; not exposed
+      as a CLI flag, same as every other internal `max_workers` tuning
+      constant in this file (`ping_sweep`, port scanning, etc.). Can't be
+      verified against real concurrent ARP scans in this sandbox (its
+      scapy/cryptography install is broken - see `--doctor`), so this was
+      validated with mocked `scan()` calls using real `time.sleep()`
+      delays and wall-clock timing assertions instead: one test confirms
+      4 subnets that each "take" 0.2s finish in well under 0.8s with
+      `max_subnet_workers=4`, and a second confirms the same 3 subnets
+      *do* serialize (>= 0.45s) when `max_subnet_workers=1` - proving the
+      executor/merge mechanics actually run concurrently and that the
+      worker cap is respected, though scapy's own thread-safety under
+      real concurrent scans remains unverified against real hardware.
+
+- [x] **`--exclude IP/CIDR`.** Skip specific addresses from a scan (a
+      printer that crashes under port probes, a NAS you don't want woken
+      from sleep) without having to narrow the whole subnet just to dodge
+      one host.
+      Done: `_parse_exclusions()`/`_is_excluded()` in both scripts, plus
+      `--exclude LIST` (comma-separated IPs and/or CIDR ranges; a bare IP
+      is treated as a /32). On `mobile_network_scanner.py`, exclusion is
+      complete - excluded hosts are dropped from `tcp_scan()`'s host list
+      before any TCP connection is attempted at all. On
+      `network_scanner.py`, true per-host exclusion isn't possible for
+      the ARP path: scapy's `srp()` broadcasts one ARP request across the
+      whole subnet in a single call, with no way to carve individual
+      addresses out of that broadcast - documented as an accepted
+      limitation. Excluded devices are still dropped immediately after
+      discovery, though, before vendor lookup, port scanning, the
+      risky-ports check, and the final report/export/tracking/history, so
+      in practice nothing beyond that one broadcast packet reaches them;
+      the ping-sweep fallback has no equivalent broadcast step to route
+      around, so it pings every host and filters after, same point in the
+      pipeline as the ARP path. A malformed `--exclude` value surfaces as
+      a clean `argparse` error (exit code 2), not a raw traceback.
+
+- [x] **Shell completion.** A bash/zsh completion script for tab-completing
+      flag names - each script has 18+ of them now, easy to half-remember.
+      No new runtime dependency needed: a small static completion script
+      (`complete -W "..."`) covers it without wiring up `argcomplete`.
+      Done: `completions.bash`, with one `complete -F` function per
+      script, hand-listing each script's flags (cross-checked against
+      each script's actual `--help` output). Only completes flag names,
+      not their arguments (a subnet, a port list, a file path all being
+      arbitrary), and only fires for a *direct* invocation matching a
+      script's own name - `./network_scanner.py` or the bare name on
+      PATH, which needed `chmod +x` on all three scripts to even be
+      possible. Does NOT work for `python3 network_scanner.py <TAB>`:
+      bash keys completion registration off `COMP_WORDS[0]`, which is
+      `python3` in that case, not the script - documented honestly in the
+      completion script's own header rather than attempting a fragile
+      workaround (hijacking every `python3 ...` command's completion
+      would break completion for any other Python script being run).
+      Static, not generated from argparse at runtime, so it can drift out
+      of sync if a flag changes without updating this file too - a
+      documented tradeoff against the extra dependency `argcomplete`
+      would add.
 
 - [x] **Scan-diff tool.** A natural complement to CSV/JSON export above:
       compare two saved scans and report what changed between them

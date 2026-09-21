@@ -31,7 +31,10 @@ python network_scanner.py --timeout 2
 `--all-subnets` auto-detects and scans every local subnet across all of the
 machine's network interfaces (e.g. Wi-Fi *and* Ethernet, or a VPN), instead
 of just the one on the default route — useful if you're not sure which
-interface a device you're looking for is actually on.
+interface a device you're looking for is actually on. Multiple subnets
+(whether from `--all-subnets` or a comma-separated list) are scanned
+concurrently, not one at a time, so having several VLANs doesn't multiply
+the wall-clock cost of a scan.
 
 Both optional dependencies below are just that — optional. The script works
 out of the box without either, falling back to slower/less detailed methods.
@@ -355,6 +358,35 @@ actually scanned (labeling it counts as "already known"). A label also
 appears in place of the hostname in the "previously-seen device(s) not
 found" report if that device goes missing later.
 
+## Excluding devices from a scan
+
+`--exclude IP/CIDR` skips one or more addresses — comma-separated, each
+either a bare IP (treated as a /32) or a CIDR range — from the rest of a
+scan, without narrowing the whole subnet just to dodge one host: a printer
+that crashes under port probes, a NAS you don't want woken from sleep, or
+a noisy neighbor you just don't care about.
+
+```
+python network_scanner.py --exclude 192.168.1.5
+python network_scanner.py --exclude 192.168.1.5,192.168.1.10
+python network_scanner.py --exclude 192.168.1.0/28
+python mobile_network_scanner.py --exclude 192.168.1.5,10.0.0.0/24
+```
+
+On `mobile_network_scanner.py`, exclusion is complete: excluded hosts are
+dropped from the list before any TCP connection is ever attempted, so
+nothing at all reaches them. On `network_scanner.py`'s ARP path, the
+initial ARP broadcast still reaches every host on the subnet — scapy's
+`srp()` sends one request across the whole range in a single call, with no
+way to carve individual addresses out of that broadcast — but excluded
+devices are dropped immediately after discovery, before vendor lookup,
+port scanning, the risky-ports check, and the final report/export/tracking,
+so in practice they're never touched beyond that one broadcast packet. The
+ping-sweep fallback (no scapy, or insufficient privileges) still pings
+every host itself — exclusion is applied the same way, right after
+discovery — since a ping sweep has no equivalent single-broadcast step to
+route around.
+
 ## Exporting results
 
 Both scripts can save a scan's results to a file with `--output FILE`,
@@ -373,6 +405,28 @@ Each run overwrites `FILE` with that scan's results — it's a snapshot of
 the latest scan, not an appended history log. A CSV's `risky_ports` column
 is `;`-separated (e.g. `23;445`) since a CSV cell can't hold a real list;
 the JSON export keeps it as a proper array.
+
+## Scan history log
+
+`--log-history FILE` appends every scan's results to `FILE` as one JSON
+line per run (`{"timestamp": "...", "devices": [...]}`), instead of
+overwriting it like `--output` does — useful under `--watch` for keeping a
+record of what the network looked like over time, or for feeding into your
+own analysis later (each line parses independently, so you don't need to
+load the whole file to read one entry).
+
+```
+python network_scanner.py --watch 300 --log-history history.jsonl
+python mobile_network_scanner.py --log-history history.jsonl
+```
+
+The file is capped at 200 entries by default (oldest dropped first) so it
+doesn't grow forever under a long-running `--watch`; override with
+`--history-max-entries N`.
+
+```
+python network_scanner.py --watch 300 --log-history history.jsonl --history-max-entries 1000
+```
 
 ## Diffing two scans
 
@@ -452,6 +506,26 @@ not a crash) — it's diagnostic, not a hard prerequisite. The one exception
 worth knowing: a failed mDNS check on `mobile_network_scanner.py` almost
 always means iOS's Local Network Privacy restriction (see
 `mdns_diagnostic.py`), which no retry or code change here can fix.
+
+## Shell tab-completion
+
+`completions.bash` adds bash tab-completion for each script's flag names
+(18+ per script by now, easy to half-remember). Source it from your
+`~/.bashrc`:
+
+```
+source /path/to/Test-repo/completions.bash
+```
+
+It only completes flag *names*, not their arguments (a subnet, a port
+list, a file path), and only fires for a direct invocation matching a
+script's own name (`./network_scanner.py`, or the bare name if it's on
+PATH — see `chmod +x`, already set on all three scripts in this repo).
+`python3 network_scanner.py <TAB>` does **not** trigger it: bash keys
+completion off the first word of the command line, which is `python3` in
+that case, not the script — see the comments at the top of
+`completions.bash` for the full explanation and workaround (putting the
+script on PATH so the bare-name form works).
 
 ## Tests
 
