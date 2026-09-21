@@ -18,6 +18,37 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       independent of the known-devices registry already used for NEW
       markers.
 
+- [ ] **Port-change detection on known devices.** The known-devices
+      registry already stores each device's last-matched port/hostname -
+      diffing this scan's port against what's stored would flag "this
+      device didn't have port 23 open last week," a sharper security
+      signal than the static RISKY_PORTS check alone. Nearly free since
+      all the data needed is already being collected; just needs a
+      small registry-schema/diff addition.
+
+- [ ] **Scan history log.** Beyond the known-devices registry's
+      first_seen/last_seen pair, append each scan's snapshot to a
+      rolling, capped/rotated log so "when did this device actually show
+      up" can be answered, not just "is it new since last time." Really
+      only pays off once CSV/JSON export (above) exists to look at it;
+      needs a cap/rotation policy so the log doesn't grow unbounded.
+
+- [x] ~~**TTL-based OS fingerprinting.**~~ Investigated and ruled out -
+      not just for iOS, for any platform. The premise was wrong:
+      `getsockopt(IPPROTO_IP, IP_TTL)` on a connected socket returns
+      *this machine's own* outgoing TTL setting, not anything about the
+      remote host - verified by connecting to two different real remote
+      hosts and getting the same `64` back for both, regardless of what
+      either one actually runs. The only route that reads a genuinely
+      *received* TTL is `IP_RECVTTL` + ancillary data via `recvmsg()`,
+      and that's a dead end too: Python's `socket` module doesn't expose
+      the `IP_RECVTTL` constant at all, it's designed around UDP's
+      per-datagram model rather than TCP's stream semantics, and the
+      alternatives that do reliably work (reading an ICMP echo reply's
+      TTL, or sniffing a SYN-ACK's IP header) need `subprocess`/`ping` or
+      a raw socket either way - exactly what this idea was supposed to
+      avoid, and exactly what iOS blocks regardless.
+
 - [x] **`--refresh-vendor-db` flag** (`network_scanner.py` only). Force a
       fresh download of the IEEE OUI registry instead of using the
       cached copy at `~/.cache/network_scanner_oui.txt`.
