@@ -35,6 +35,24 @@ pip install scapy   # enables the faster ARP-scan path (returns MAC addresses)
 pip install psutil  # enables --all-subnets (interface enumeration)
 ```
 
+**Hostnames and vendors, filled in automatically, no extra dependency:**
+- Any device still missing a hostname after ARP/reverse-DNS gets the same
+  mDNS reverse lookup and DNS-SD Cast service discovery as
+  `mobile_network_scanner.py` (see that script's section below for how
+  these work) — and unlike on iOS, there's no sandboxing here to block it,
+  so this reliably resolves things like Chromecast names on desktop/Termux.
+- Any device with a MAC address gets it looked up against the IEEE's public
+  OUI registry to identify the manufacturer (e.g. `aa:bb:cc:dd:ee:ff` →
+  `Apple, Inc.`). The registry (a few MB) is downloaded once and cached at
+  `~/.cache/network_scanner_oui.txt`; later runs reuse the cache instantly.
+  Pass `--no-vendor-lookup` to skip this entirely (e.g. for an offline scan,
+  or to avoid the first-run download).
+
+```
+python network_scanner.py --mdns-timeout 0.5
+python network_scanner.py --no-vendor-lookup
+```
+
 ### `mobile_network_scanner.py`
 
 For sandboxed Python runtimes that can't spawn subprocesses or open raw
@@ -98,10 +116,31 @@ Cast service-discovery query also joins the mDNS multicast group and
 binds to port 5353 (falling back to an ordinary socket if that's denied)
 since service-browsing replies are commonly sent via multicast
 regardless of the unicast-response bit a one-shot address lookup relies
-on. If Chromecast/Cast devices still show no name after all this, it's
-worth checking whether "Local Network" permission is actually granted to
-your terminal app (Settings → Privacy & Security → Local Network) — some
-sandboxes silently drop this kind of traffic without it.
+on.
+
+**Known limitation on iOS:** in testing, every mDNS/DNS-SD query from
+a-Shell failed outright with `OSError(65, 'No route to host')` on the
+send itself — confirmed with `mdns_diagnostic.py` (see below) — which
+points to iOS's Local Network Privacy model rather than a bug here: apps
+must declare, at the app-bundle level (`NSBonjourServices` in
+`Info.plist`), exactly which Bonjour service types they intend to use.
+A generic terminal app has no way to declare that for a script typed at
+runtime, so iOS blocks the multicast traffic before it ever leaves the
+device - regardless of the general "Local Network" permission toggle,
+and regardless of anything this script does differently. Plain TCP port
+scanning is unaffected, since that's ordinary unicast traffic and
+doesn't require this. If you hit this, your router's admin page or a
+native network-scanner app (which declares the right entitlements at
+build time) are the practical alternatives.
+
+```
+python mdns_diagnostic.py
+```
+
+This standalone script isolates each step (socket creation, binding to
+port 5353, joining the multicast group, sending a query, receiving any
+reply at all) so you can see exactly which layer is failing rather than
+guessing from "no hostname" alone.
 
 **Running on iPhone:** install [a-Shell](https://apps.apple.com/us/app/a-shell/id1473805438)
 from the App Store (not "a-Shell mini," which strips out `git`), then either
