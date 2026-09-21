@@ -100,7 +100,7 @@ class TestScanAllSubnets:
 
         patch_hostnames, patch_vendors = self._patch_enrichment()
         with patch("network_scanner.scan", side_effect=fake_scan), patch_hostnames, patch_vendors:
-            devices = ns.scan_all_subnets(["192.168.1.0/24", "10.0.0.0/24"], timeout=1.0)
+            devices = ns.scan_all_subnets(["192.168.1.0/24", "10.0.0.0/24"], timeout=1.0, scan_ports=False)
 
         assert [d["ip"] for d in devices] == ["10.0.0.9", "192.168.1.5"]
 
@@ -108,7 +108,7 @@ class TestScanAllSubnets:
         patch_hostnames, patch_vendors = self._patch_enrichment()
         with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "", "hostname": ""}]), \
                 patch_hostnames, patch_vendors:
-            devices = ns.scan_all_subnets(["192.168.1.0/24", "192.168.1.0/24"], timeout=1.0)
+            devices = ns.scan_all_subnets(["192.168.1.0/24", "192.168.1.0/24"], timeout=1.0, scan_ports=False)
 
         assert len(devices) == 1
 
@@ -134,7 +134,7 @@ class TestScanAllSubnets:
         with patch("network_scanner.scan", side_effect=fake_scan), \
                 patch("network_scanner._resolve_missing_hostnames", side_effect=fake_resolve) as mock_resolve, \
                 patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices):
-            devices = ns.scan_all_subnets(["192.168.1.0/24", "10.0.0.0/24"], timeout=1.0, mdns_timeout=0.4)
+            devices = ns.scan_all_subnets(["192.168.1.0/24", "10.0.0.0/24"], timeout=1.0, mdns_timeout=0.4, scan_ports=False)
 
         assert mock_resolve.call_count == 2
         assert all(call.args[1] == 0.4 for call in mock_resolve.call_args_list)
@@ -144,7 +144,7 @@ class TestScanAllSubnets:
         with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "x"}]), \
                 patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
                 patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices) as mock_vendor:
-            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0)
+            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0, scan_ports=False)
 
         mock_vendor.assert_called_once()
 
@@ -152,7 +152,7 @@ class TestScanAllSubnets:
         with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "x"}]), \
                 patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
                 patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices) as mock_vendor:
-            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0, refresh_vendor_db=True)
+            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0, refresh_vendor_db=True, scan_ports=False)
 
         assert mock_vendor.call_args.kwargs.get("force_refresh") is True
 
@@ -160,9 +160,162 @@ class TestScanAllSubnets:
         with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "x"}]), \
                 patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
                 patch("network_scanner._attach_vendor_names") as mock_vendor:
-            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0, vendor_lookup=False)
+            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0, vendor_lookup=False, scan_ports=False)
 
         mock_vendor.assert_not_called()
+
+    def test_attaches_open_ports_and_risky_ports_over_final_list_by_default(self):
+        with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "", "hostname": "x", "vendor": ""}]), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices), \
+                patch("network_scanner._attach_open_ports", side_effect=lambda devices, ports, timeout: devices) as mock_ports, \
+                patch("network_scanner._attach_risky_ports", side_effect=lambda devices, timeout: devices) as mock_risky:
+            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0)
+
+        mock_ports.assert_called_once()
+        mock_risky.assert_called_once()
+
+    def test_uses_default_ports_when_none_specified(self):
+        with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "", "hostname": "x", "vendor": ""}]), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices), \
+                patch("network_scanner._attach_open_ports", side_effect=lambda devices, ports, timeout: devices) as mock_ports, \
+                patch("network_scanner._attach_risky_ports", side_effect=lambda devices, timeout: devices):
+            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0)
+
+        assert mock_ports.call_args.args[1] == ns.DEFAULT_PORTS
+
+    def test_passes_custom_ports_through(self):
+        with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "", "hostname": "x", "vendor": ""}]), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices), \
+                patch("network_scanner._attach_open_ports", side_effect=lambda devices, ports, timeout: devices) as mock_ports, \
+                patch("network_scanner._attach_risky_ports", side_effect=lambda devices, timeout: devices):
+            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0, ports=[22, 80])
+
+        assert mock_ports.call_args.args[1] == [22, 80]
+
+    def test_skips_port_scanning_when_disabled(self):
+        with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "", "hostname": "x", "vendor": ""}]), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices), \
+                patch("network_scanner._attach_open_ports") as mock_ports, \
+                patch("network_scanner._attach_risky_ports") as mock_risky:
+            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0, scan_ports=False)
+
+        mock_ports.assert_not_called()
+        mock_risky.assert_not_called()
+
+    def test_skips_risky_port_check_when_disabled_but_keeps_open_port_probe(self):
+        with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "", "hostname": "x", "vendor": ""}]), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices), \
+                patch("network_scanner._attach_open_ports", side_effect=lambda devices, ports, timeout: devices) as mock_ports, \
+                patch("network_scanner._attach_risky_ports") as mock_risky:
+            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0, check_risky_ports=False)
+
+        mock_ports.assert_called_once()
+        mock_risky.assert_not_called()
+
+    def test_skips_port_scanning_when_no_devices_found(self):
+        with patch("network_scanner.scan", return_value=[]), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_open_ports") as mock_ports, \
+                patch("network_scanner._attach_risky_ports") as mock_risky:
+            assert ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0) == []
+
+        mock_ports.assert_not_called()
+        mock_risky.assert_not_called()
+
+
+class TestProbeOpenPort:
+    def test_returns_first_open_port(self):
+        def fake_probe(ip, port, timeout):
+            return port == 443
+
+        with patch("network_scanner._probe_tcp_port", side_effect=fake_probe):
+            assert ns.probe_open_port("192.168.1.1", [80, 443, 22], timeout=0.1) == 443
+
+    def test_returns_none_when_nothing_open(self):
+        with patch("network_scanner._probe_tcp_port", return_value=False):
+            assert ns.probe_open_port("192.168.1.1", [80, 443], timeout=0.1) is None
+
+    def test_stops_at_first_success(self):
+        with patch("network_scanner._probe_tcp_port", return_value=True) as mock_probe:
+            ns.probe_open_port("192.168.1.1", [80, 443, 22], timeout=0.1)
+
+        mock_probe.assert_called_once()
+
+
+class TestAttachOpenPorts:
+    def test_fills_in_port_for_each_device(self):
+        devices = [
+            {"ip": "192.168.1.1", "mac": "", "hostname": "", "vendor": ""},
+            {"ip": "192.168.1.2", "mac": "", "hostname": "", "vendor": ""},
+        ]
+
+        def fake_probe(ip, ports, timeout):
+            return {"192.168.1.1": 80, "192.168.1.2": None}[ip]
+
+        with patch("network_scanner.probe_open_port", side_effect=fake_probe):
+            result = ns._attach_open_ports(devices, ns.DEFAULT_PORTS, timeout=0.1)
+
+        by_ip = {d["ip"]: d["port"] for d in result}
+        assert by_ip == {"192.168.1.1": 80, "192.168.1.2": None}
+
+
+class TestFindRiskyPorts:
+    def test_reports_all_open_risky_ports_not_just_the_first(self):
+        def fake_probe(ip, port, timeout):
+            return port in (23, 3389)
+
+        with patch("network_scanner._probe_tcp_port", side_effect=fake_probe):
+            assert ns._find_risky_ports("192.168.1.1", timeout=0.1) == [23, 3389]
+
+    def test_returns_empty_list_when_none_open(self):
+        with patch("network_scanner._probe_tcp_port", return_value=False):
+            assert ns._find_risky_ports("192.168.1.1", timeout=0.1) == []
+
+
+class TestAttachRiskyPorts:
+    def test_fills_in_risky_ports_for_each_device(self):
+        devices = [{"ip": "192.168.1.1", "mac": "", "hostname": "", "vendor": ""}]
+
+        with patch("network_scanner._find_risky_ports", return_value=[23]):
+            result = ns._attach_risky_ports(devices, timeout=0.1)
+
+        assert result[0]["risky_ports"] == [23]
+
+
+class TestUseColor:
+    def test_disabled_by_no_color_flag(self):
+        with patch("network_scanner.sys.stdout.isatty", return_value=True), \
+                patch.dict("network_scanner.os.environ", {}, clear=True):
+            assert ns._use_color(no_color_flag=True) is False
+
+    def test_disabled_by_no_color_env_var(self):
+        with patch("network_scanner.sys.stdout.isatty", return_value=True), \
+                patch.dict("network_scanner.os.environ", {"NO_COLOR": "1"}):
+            assert ns._use_color(no_color_flag=False) is False
+
+    def test_disabled_when_stdout_is_not_a_tty(self):
+        with patch("network_scanner.sys.stdout.isatty", return_value=False), \
+                patch.dict("network_scanner.os.environ", {}, clear=True):
+            assert ns._use_color(no_color_flag=False) is False
+
+    def test_enabled_when_none_of_the_above_apply(self):
+        with patch("network_scanner.sys.stdout.isatty", return_value=True), \
+                patch.dict("network_scanner.os.environ", {}, clear=True):
+            assert ns._use_color(no_color_flag=False) is True
+
+
+class TestColorize:
+    def test_wraps_text_in_ansi_codes_when_enabled(self):
+        result = ns._colorize("NEW", "green", enabled=True)
+        assert result == f"{ns._ANSI_CODES['green']}NEW{ns._ANSI_CODES['reset']}"
+
+    def test_returns_plain_text_when_disabled(self):
+        assert ns._colorize("NEW", "green", enabled=False) == "NEW"
 
 
 class TestDnsNameEncoding:

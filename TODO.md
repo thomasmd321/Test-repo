@@ -103,17 +103,38 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       bulk scan uses. Bypasses subnet resolution, known-device tracking,
       and `--watch` entirely - it's a one-off investigation, not a scan.
 
-- [ ] **Port scanning for `network_scanner.py`.** It currently only does
+- [x] **Port scanning for `network_scanner.py`.** It currently only does
       ARP/ping — no port info at all, unlike `mobile_network_scanner.py`'s
       `PORT_SERVICES` fingerprinting. Porting that over (as an optional
       supplement to ARP, not a replacement) would help identify
       blank-hostname devices the same way it already does on the phone.
+      Done: `DEFAULT_PORTS`/`probe_open_port()`/`_attach_open_ports()`,
+      on by default (`--no-scan-ports` to skip, `--ports` to override).
+      Hit a real forward-reference bug along the way: `scan_all_subnets()`
+      used `DEFAULT_PORTS` as a parameter default before that constant
+      was defined later in the file - Python evaluates default values
+      at function-definition time, not call time, so this raised
+      `NameError` at import. Fixed with a `None` sentinel resolved
+      inside the function body instead of reordering large blocks of code.
 
-- [ ] **Risky-port flagging.** Mark devices exposing things like telnet
+- [x] **Risky-port flagging.** Mark devices exposing things like telnet
       (23), unauthenticated RDP (3389), or SMB (445) with a visible
       warning — a basic home-network hygiene check. Cheap once port
       scanning (above) exists.
+      Done: `RISKY_PORTS`/`_find_risky_ports()`/`_attach_risky_ports()`,
+      checked independently of the general port probe above (which
+      stops at the first open port, so it could otherwise miss telnet
+      entirely if port 80 happened to be checked first). On by default;
+      `--no-risky-ports` to skip while keeping the general probe.
 
-- [ ] **Colorized terminal output.** Green for NEW, dim/red for missing,
+- [x] **Colorized terminal output.** Green for NEW, dim/red for missing,
       using plain ANSI escape codes (no new dependency). Readability
       only, no functional change.
+      Done: `_use_color()` (respects `--no-color`, the `NO_COLOR` env
+      var, and auto-disables when stdout isn't a terminal) and
+      `_colorize()`. Real testing caught a genuine bug: nesting two
+      `_colorize()` calls (e.g. a NEW device that's also risky) broke,
+      since ANSI's reset code clears *all* active styling, not just the
+      innermost color - the inner reset was killing the outer color
+      partway through the line. Fixed by picking one color per row by
+      priority (risky > new > plain) instead of nesting.

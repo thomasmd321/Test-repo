@@ -84,6 +84,34 @@ Known limitations of this first pass:
   nibble format). MAC vendor lookup still works normally, since it
   doesn't care which IP version found the MAC.
 
+**Port scanning and risky-port flagging (on by default):** every discovered
+device also gets probed for an open port from `DEFAULT_PORTS` — the same
+port list/labels `mobile_network_scanner.py` uses (`80, 443, 22, 445, 139,
+8080, 8443, 62078, 3389, 5000, 7000`), just applied here too so a device
+with no hostname and no vendor at least gets a "port 8443, https-alt"
+clue. Separately, every device is also checked against `RISKY_PORTS` — a
+small, non-exhaustive list of ports worth a second look on a home network
+(telnet, FTP, SMB, RDP, VNC) — *independent* of the general port probe
+above, which stops at the first open port it finds and could otherwise
+miss telnet entirely if port 80 happened to be checked first. Devices
+exposing one get called out in a summary section after the table, along
+with a one-line reason.
+
+```
+python network_scanner.py --no-scan-ports          # skip both entirely
+python network_scanner.py --ports 22,80,443        # probe a custom list instead
+python network_scanner.py --no-risky-ports          # keep the port probe, skip the security check
+python network_scanner.py --port-timeout 0.5
+```
+
+**Colorized output:** NEW devices print in green, a device exposing a
+risky port prints in red (taking priority if it's also NEW — it's still
+visibly NEW from the marker text either way), and the missing-device
+report prints dim. Plain ANSI codes, no dependency. Automatically
+disabled when stdout isn't a terminal (piped to a file, etc.) or the
+[`NO_COLOR`](https://no-color.org) environment variable is set; `--no-color`
+disables it explicitly.
+
 **Single-device deep dive (`--identify IP`):** the bulk scan is tuned for
 speed across up to 254 hosts, so it can't afford long timeouts or a wide
 port list — which is exactly why some devices come back with no
