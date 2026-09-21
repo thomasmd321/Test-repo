@@ -52,6 +52,7 @@ import argparse
 import ipaddress
 import json
 import socket
+import ssl
 import struct
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -70,6 +71,10 @@ class Device(TypedDict):
     # hostname - see PORT_SERVICES below - though it's only ever *one*
     # open port, not a full list of everything the device is listening on.
     port: int
+    # Whatever grab_banner() read back from that port - an HTTP Server:
+    # header, an SSH version string, etc. - or "" if nothing useful came
+    # back. Often identifies a device outright when hostname is blank.
+    banner: str
 
 
 # Ports likely to be open on common home/office devices, so a scan finds
@@ -111,6 +116,12 @@ PORT_SERVICES: Dict[int, str] = {
     5353: "mdns/bonjour",
     8009: "chromecast",
 }
+
+# Ports where it's worth sending a bare HTTP HEAD request to provoke a
+# response, rather than just listening for an unprompted banner - plain
+# HTTP and TLS-wrapped HTTP respectively. See grab_banner().
+_HTTP_PORTS = frozenset({80, 8000, 8080, 8081})
+_HTTPS_PORTS = frozenset({443, 8443})
 
 
 def get_local_subnet() -> str:
@@ -578,12 +589,107 @@ def probe_host(ip: str, ports: Iterable[int], timeout: float) -> Optional[int]:
     return None
 
 
+def _summarize_banner(data: bytes) -> str:
+    """Reduce raw banner bytes to one short, printable line.
+
+    Args:
+        data: Whatever bytes grab_banner() read back from a socket -
+            could be a multi-line HTTP response, a single-line SSH
+            version string, or anything else a service sends unprompted.
+
+    Returns:
+        The first non-blank line, unless a later line starts with
+        "Server:" (an HTTP header worth surfacing alongside whatever
+        line - usually the HTTP status line - came first), in which case
+        both are joined. "" if data has no printable content at all.
+    """
+    text = data.decode("utf-8", errors="replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    for line in lines:
+        if line.lower().startswith("server:"):
+            return line if line == lines[0] else f"{lines[0]}  |  {line}"
+    return lines[0][:120]
+
+
+def grab_banner(ip: str, port: int, timeout: float) -> str:
+    """Try to read a service banner from an already-open TCP port.
+
+    Some protocols (SSH, FTP, and others) send a startup banner the
+    moment a client connects, with no request needed. Others (HTTP) wait
+    for a request first. And a fair number of IoT admin UIs run a plain
+    HTTP server on some arbitrary, unrecognized port. To cover all three
+    without guessing wrong, this: sends an HTTP request outright for
+    ports known to speak HTTP(S); otherwise listens briefly for an
+    unprompted banner, and only sends an HTTP HEAD request as a fallback
+    if nothing arrived on its own.
+
+    Args:
+        ip: The target host's IPv4 address.
+        port: The TCP port to grab a banner from - assumed to already be
+            open (e.g. from probe_host()); this doesn't itself check.
+        timeout: How long to wait for the connection and each read, in
+            seconds.
+
+    Returns:
+        A short, one-line summary of whatever banner was found (see
+        _summarize_banner()), or "" if the connection failed or nothing
+        useful came back.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as raw_sock:
+            raw_sock.settimeout(timeout)
+            raw_sock.connect((ip, port))
+
+            if port in _HTTPS_PORTS:
+                # verify_mode=CERT_NONE (with check_hostname off, which
+                # CERT_NONE requires) is intentional here: this is a banner
+                # grab against an arbitrary LAN device, most of which use
+                # self-signed certs anyway - not a connection we need to
+                # trust, just read a response from. The public
+                # create_default_context() API is used (rather than the
+                # private _create_unverified_context() helper) even though
+                # both end up equally unverified.
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                sock = context.wrap_socket(raw_sock, server_hostname=ip)
+            else:
+                sock = raw_sock
+
+            http_request = f"HEAD / HTTP/1.0\r\nHost: {ip}\r\n\r\n".encode("ascii", errors="replace")
+
+            if port in _HTTP_PORTS or port in _HTTPS_PORTS:
+                sock.sendall(http_request)
+                data = sock.recv(1024)
+            else:
+                # Unrecognized port: listen first, since some protocols
+                # (SSH, FTP) volunteer a banner with no request needed and
+                # would just ignore/reject an HTTP request sent at them.
+                try:
+                    data = sock.recv(1024)
+                except socket.timeout:
+                    data = b""
+                if not data:
+                    # Nothing came back unprompted - try treating it as an
+                    # HTTP server anyway, since plenty of IoT admin UIs run
+                    # HTTP on non-standard ports.
+                    sock.sendall(http_request)
+                    data = sock.recv(1024)
+    except (OSError, ssl.SSLError):
+        return ""
+
+    return _summarize_banner(data)
+
+
 def tcp_scan(
     subnet: str,
     timeout: float = 0.5,
     ports: Sequence[int] = DEFAULT_PORTS,
     max_workers: int = 100,
     mdns_timeout: float = 0.3,
+    grab_banners: bool = True,
 ) -> List[Device]:
     """Discover devices by probing common TCP ports across every host in subnet.
 
@@ -601,13 +707,20 @@ def tcp_scan(
             a device has no reverse-DNS hostname (see
             mdns_reverse_lookup()). Kept separate from timeout since it's
             a different, typically slower, kind of lookup.
+        grab_banners: Whether to also read a banner from each device's
+            open port (see grab_banner()). On by default - it's the same
+            plain-socket primitives this script already uses, and often
+            identifies a device that has no hostname at all - but can be
+            turned off for a faster scan.
 
     Returns:
         Discovered devices sorted by IP address, each with "hostname"
         populated from Cast service discovery (for Chromecast-port
         devices), reverse DNS, or mDNS reverse lookup - whichever found
-        one first, or "" if none did - and "port" set to whichever
-        probed port answered first.
+        one first, or "" if none did - "port" set to whichever probed
+        port answered first, and "banner" set to whatever grab_banner()
+        read from that port, or "" if grab_banners is False or nothing
+        useful came back.
     """
     # strict=False: subnet may be given as a host address (e.g. from
     # get_local_subnet()) rather than a "clean" network address.
@@ -644,6 +757,21 @@ def tcp_scan(
     if any(port == _CAST_CONTROL_PORT for port in matched_ports.values()):
         cast_names = mdns_service_lookup(_CAST_SERVICE_TYPE, timeout=mdns_timeout)
 
+    # Grabbing a banner from every live host's open port up front (rather
+    # than only when printing) keeps this the one place tcp_scan() talks
+    # to each device, same as the hostname-resolution step below - and a
+    # thread pool again avoids paying each grab_banner() timeout serially.
+    banners: Dict[str, str] = {}
+    if grab_banners and matched_ports:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(grab_banner, ip_str, port, timeout): ip_str
+                for ip_str, port in matched_ports.items()
+            }
+            for future in as_completed(futures):
+                ip_str = futures[future]
+                banners[ip_str] = future.result()
+
     devices: List[Device] = []
     # IPs Cast service discovery already named don't need the slower,
     # per-host reverse-DNS/mDNS fallback below.
@@ -661,11 +789,25 @@ def tcp_scan(
         for future in as_completed(futures):
             ip_str = futures[future]
             hostname = future.result()
-            devices.append({"ip": ip_str, "hostname": hostname, "port": matched_ports[ip_str]})
+            devices.append(
+                {
+                    "ip": ip_str,
+                    "hostname": hostname,
+                    "port": matched_ports[ip_str],
+                    "banner": banners.get(ip_str, ""),
+                }
+            )
 
     for ip_str, hostname in cast_names.items():
         if ip_str in matched_ports:
-            devices.append({"ip": ip_str, "hostname": hostname, "port": matched_ports[ip_str]})
+            devices.append(
+                {
+                    "ip": ip_str,
+                    "hostname": hostname,
+                    "port": matched_ports[ip_str],
+                    "banner": banners.get(ip_str, ""),
+                }
+            )
 
     # Sort numerically by IP (not lexicographically as strings, which would
     # put "10.0.0.2" after "10.0.0.10").
@@ -678,6 +820,7 @@ def scan_all_subnets(
     ports: Sequence[int] = DEFAULT_PORTS,
     max_workers: int = 100,
     mdns_timeout: float = 0.3,
+    grab_banners: bool = True,
 ) -> List[Device]:
     """Run tcp_scan() over multiple subnets and merge the results into one list.
 
@@ -687,6 +830,7 @@ def scan_all_subnets(
         ports: Passed through to tcp_scan() for each subnet.
         max_workers: Passed through to tcp_scan() for each subnet.
         mdns_timeout: Passed through to tcp_scan() for each subnet.
+        grab_banners: Passed through to tcp_scan() for each subnet.
 
     Returns:
         Every discovered device across all subnets, sorted by IP and
@@ -698,7 +842,12 @@ def scan_all_subnets(
     devices_by_ip: Dict[str, Device] = {}
     for subnet in subnets:
         for device in tcp_scan(
-            subnet, timeout=timeout, ports=ports, max_workers=max_workers, mdns_timeout=mdns_timeout
+            subnet,
+            timeout=timeout,
+            ports=ports,
+            max_workers=max_workers,
+            mdns_timeout=mdns_timeout,
+            grab_banners=grab_banners,
         ):
             devices_by_ip[device["ip"]] = device
 
@@ -842,6 +991,11 @@ def main() -> None:
         action="store_true",
         help="Clear the known-devices registry before scanning, so every device found in this run is marked NEW",
     )
+    parser.add_argument(
+        "--no-banners",
+        action="store_true",
+        help="Skip banner grabbing on each device's open port - faster, but loses a good identification hint for devices with no hostname",
+    )
     args = parser.parse_args()
 
     # If the user didn't pass a subnet, auto-detect it from the device's
@@ -863,7 +1017,11 @@ def main() -> None:
         print(f"Scanning {', '.join(subnets)} on ports {ports} ...")
 
         devices: List[Device] = scan_all_subnets(
-            subnets, timeout=args.timeout, ports=ports, mdns_timeout=args.mdns_timeout
+            subnets,
+            timeout=args.timeout,
+            ports=ports,
+            mdns_timeout=args.mdns_timeout,
+            grab_banners=not args.no_banners,
         )
 
         if not devices:
@@ -886,8 +1044,8 @@ def main() -> None:
         # A leading marker column (rather than reflowing every other
         # column's width) keeps a NEW device visually obvious without
         # disturbing the table's layout when tracking is off.
-        print(f"\n{'':<5}{'IP Address':<18}{'Port':<8}{'Service':<24}Hostname")
-        print("-" * 75)
+        print(f"\n{'':<5}{'IP Address':<18}{'Port':<8}{'Service':<24}{'Hostname':<24}Banner")
+        print("-" * 110)
         new_count = 0
         for device in devices:
             port = device["port"]
@@ -899,7 +1057,11 @@ def main() -> None:
                 new_count += 1
             else:
                 marker = "     "
-            print(f"{marker}{device['ip']:<18}{port:<8}{service:<24}{device.get('hostname', '')}")
+            banner = device.get("banner") or ""
+            print(
+                f"{marker}{device['ip']:<18}{port:<8}{service:<24}"
+                f"{device.get('hostname', ''):<24}{banner}"
+            )
 
         print(f"\n{len(devices)} device(s) found.", end="")
         if not args.no_track_devices:

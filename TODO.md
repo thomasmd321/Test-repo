@@ -138,3 +138,45 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       innermost color - the inner reset was killing the outer color
       partway through the line. Fixed by picking one color per row by
       priority (risky > new > plain) instead of nesting.
+
+## `mobile_network_scanner.py`-specific
+
+Several of the ideas above only got built for `network_scanner.py`. Most
+don't apply to iOS at all (IPv6 discovery and MAC vendor lookup both need
+`subprocess`/ARP, which the sandbox blocks), but a few use nothing beyond
+plain sockets and are fully portable:
+
+- [x] **Banner grabbing.** The standout item here - unlike mDNS/DNS-SD
+      (confirmed completely blocked on iOS by `mdns_diagnostic.py`),
+      banner grabbing is pure `socket`/`ssl`, the same primitives
+      `probe_host()` already uses. Could have identified this session's
+      actual mystery devices (`.26`, `.72`, etc.) without ever touching
+      the thing iOS blocks.
+      Done: ported `grab_banner()`/`_summarize_banner()` from
+      `network_scanner.py` verbatim (same listen-first-then-HTTP-fallback
+      strategy, same public `ssl.create_default_context()` +
+      `check_hostname=False`/`verify_mode=CERT_NONE` pattern). Unlike the
+      desktop version - where it's an `--identify IP` single-host deep
+      dive - it's wired directly into `tcp_scan()`'s bulk scan here,
+      since this script has no deep-dive mode; `--no-banners` skips it
+      for a faster scan. Verified against real local HTTP servers on
+      both a recognized port (8080) and an unrecognized one, confirming
+      the fallback probe fires correctly on the latter.
+
+- [ ] **Risky-port flagging.** Pure TCP connect checks against a specific
+      port list - no special privileges needed, and the port-probing
+      infrastructure already exists in this script.
+
+- [ ] **Colorized output.** Plain ANSI codes; a-Shell's terminal renders
+      them fine.
+
+- [ ] **Custom device labels/aliases** and **export scan results to
+      CSV/JSON** (see the shared ideas above) - neither is platform-
+      specific at all, both are just local file I/O.
+
+Weaker fit, not started: a `--identify IP` deep-dive mode would work for
+banner grabbing and a wider port list, but would be missing the MAC/
+vendor half entirely (no ARP access on iOS) - a strictly smaller version
+of the desktop one. MQTT/Home Assistant publishing and a local web
+dashboard both assume something staying resident and reachable, which
+doesn't fit a phone that isn't left running as a server.

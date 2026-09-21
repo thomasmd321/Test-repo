@@ -45,6 +45,93 @@ class TestProbeHost:
         assert fake_sock.connect_ex.call_count == 1
 
 
+class TestSummarizeBanner:
+    def test_prefers_server_header_over_status_line(self):
+        data = b"HTTP/1.1 200 OK\r\nServer: lighttpd/1.4.55\r\nContent-Length: 0\r\n\r\n"
+        assert ms._summarize_banner(data) == "HTTP/1.1 200 OK  |  Server: lighttpd/1.4.55"
+
+    def test_returns_first_line_when_no_server_header(self):
+        data = b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3\r\n"
+        assert ms._summarize_banner(data) == "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"
+
+    def test_returns_empty_string_for_blank_data(self):
+        assert ms._summarize_banner(b"\r\n\r\n   \r\n") == ""
+
+    def test_truncates_long_lines(self):
+        data = ("x" * 300).encode("ascii") + b"\r\n"
+        assert len(ms._summarize_banner(data)) == 120
+
+
+class TestGrabBanner:
+    def test_sends_head_request_on_http_port(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recv.return_value = b"HTTP/1.1 200 OK\r\nServer: nginx\r\n\r\n"
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            result = ms.grab_banner("192.168.1.1", 80, timeout=0.5)
+
+        assert "nginx" in result
+        sent = fake_sock.sendall.call_args[0][0]
+        assert sent.startswith(b"HEAD / HTTP/1.0")
+
+    def test_reads_unprompted_banner_on_non_http_port(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recv.return_value = b"SSH-2.0-OpenSSH_8.9p1\r\n"
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            result = ms.grab_banner("192.168.1.1", 22, timeout=0.5)
+
+        assert result == "SSH-2.0-OpenSSH_8.9p1"
+        fake_sock.sendall.assert_not_called()
+
+    def test_wraps_https_port_in_tls(self):
+        fake_raw_sock = MagicMock()
+        fake_raw_sock.__enter__.return_value = fake_raw_sock
+        fake_wrapped_sock = MagicMock()
+        fake_wrapped_sock.recv.return_value = b"HTTP/1.1 401 Unauthorized\r\nServer: lighttpd\r\n\r\n"
+
+        fake_context = MagicMock()
+        fake_context.wrap_socket.return_value = fake_wrapped_sock
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_raw_sock), \
+                patch("mobile_network_scanner.ssl.create_default_context", return_value=fake_context):
+            result = ms.grab_banner("192.168.1.1", 8443, timeout=0.5)
+
+        assert "lighttpd" in result
+        assert fake_context.check_hostname is False
+        fake_wrapped_sock.sendall.assert_called_once()
+
+    def test_returns_empty_string_on_connection_failure(self):
+        with patch("mobile_network_scanner.socket.socket", side_effect=OSError("Connection refused")):
+            assert ms.grab_banner("192.168.1.1", 80, timeout=0.5) == ""
+
+    def test_falls_back_to_http_probe_on_unrecognized_silent_port(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        # First recv() (passive listen) times out; second recv() (after
+        # the HTTP fallback probe) returns a real response.
+        fake_sock.recv.side_effect = [socket.timeout, b"HTTP/1.1 200 OK\r\nServer: mystery-iot\r\n\r\n"]
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            result = ms.grab_banner("192.168.1.1", 9999, timeout=0.5)
+
+        assert "mystery-iot" in result
+        fake_sock.sendall.assert_called_once()
+
+    def test_does_not_send_http_probe_when_unrecognized_port_already_answered(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recv.return_value = b"220 example-ftp ready\r\n"
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            result = ms.grab_banner("192.168.1.1", 9999, timeout=0.5)
+
+        assert result == "220 example-ftp ready"
+        fake_sock.sendall.assert_not_called()
+
+
 class TestDnsNameEncoding:
     def test_round_trips_a_simple_name(self):
         encoded = ms._encode_dns_name("72.1.168.192.in-addr.arpa")
@@ -333,6 +420,7 @@ class TestTcpScan:
             return 80 if ip in ("192.168.1.2", "192.168.1.10") else None
 
         with patch("mobile_network_scanner.probe_host", side_effect=fake_probe), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
                 patch("mobile_network_scanner._resolve_hostname", return_value=""):
             devices = ms.tcp_scan("192.168.1.0/28", timeout=0.1, max_workers=8)
 
@@ -345,10 +433,11 @@ class TestTcpScan:
         # trigger the Cast-service-discovery path - see TestTcpScan's
         # cast-specific tests below for that.
         with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
                 patch("mobile_network_scanner._resolve_hostname", return_value="phone.local"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
-        assert {"ip": "192.168.1.1", "hostname": "phone.local", "port": 80} in devices
+        assert {"ip": "192.168.1.1", "hostname": "phone.local", "port": 80, "banner": ""} in devices
 
     def test_falls_back_to_mdns_when_reverse_dns_has_no_hostname(self):
         # Exercises the real _resolve_hostname (not mocked out), so this
@@ -356,6 +445,7 @@ class TestTcpScan:
         # that _resolve_hostname works in isolation. Port 80 avoids also
         # triggering Cast service discovery (tested separately below).
         with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
                 patch("mobile_network_scanner.socket.gethostbyaddr", side_effect=socket.gaierror), \
                 patch("mobile_network_scanner.mdns_reverse_lookup", return_value="some-device.local"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, mdns_timeout=0.2)
@@ -364,17 +454,19 @@ class TestTcpScan:
 
     def test_uses_cast_service_name_when_chromecast_port_matches(self):
         with patch("mobile_network_scanner.probe_host", return_value=8009), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
                 patch("mobile_network_scanner.mdns_service_lookup", return_value={"192.168.1.1": "Living Room TV"}), \
                 patch("mobile_network_scanner._resolve_hostname", return_value="should-not-be-used"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, mdns_timeout=0.2)
 
-        assert {"ip": "192.168.1.1", "hostname": "Living Room TV", "port": 8009} in devices
+        assert {"ip": "192.168.1.1", "hostname": "Living Room TV", "port": 8009, "banner": ""} in devices
 
     def test_falls_back_to_resolve_hostname_when_cast_lookup_has_no_name_for_ip(self):
         # mdns_service_lookup() might name some Cast devices on the
         # subnet but not this particular one (e.g. its A record arrived
         # too late) - it should still get a chance via the normal path.
         with patch("mobile_network_scanner.probe_host", return_value=8009), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
                 patch("mobile_network_scanner.mdns_service_lookup", return_value={}), \
                 patch("mobile_network_scanner._resolve_hostname", return_value="fallback.local"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, mdns_timeout=0.2)
@@ -383,6 +475,7 @@ class TestTcpScan:
 
     def test_skips_cast_lookup_when_no_chromecast_port_present(self):
         with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
                 patch("mobile_network_scanner.mdns_service_lookup") as mock_cast_lookup, \
                 patch("mobile_network_scanner._resolve_hostname", return_value=""):
             ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
@@ -391,6 +484,7 @@ class TestTcpScan:
 
     def test_missing_hostname_defaults_to_empty_string(self):
         with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
                 patch("mobile_network_scanner._resolve_hostname", return_value=""):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
@@ -412,13 +506,40 @@ class TestTcpScan:
 
         assert all(ports == ms.DEFAULT_PORTS for ports in captured_ports)
 
+    def test_attaches_banner_from_grab_banner_for_each_matched_port(self):
+        with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.grab_banner", return_value="Server: lighttpd"), \
+                patch("mobile_network_scanner._resolve_hostname", return_value=""):
+            devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
+
+        assert all(d["banner"] == "Server: lighttpd" for d in devices)
+
+    def test_grab_banner_called_with_each_device_matched_port(self):
+        with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.grab_banner", return_value="") as mock_grab_banner, \
+                patch("mobile_network_scanner._resolve_hostname", return_value=""):
+            ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
+
+        mock_grab_banner.assert_any_call("192.168.1.1", 80, 0.1)
+        mock_grab_banner.assert_any_call("192.168.1.2", 80, 0.1)
+        assert mock_grab_banner.call_count == 2
+
+    def test_skips_banner_grabbing_when_disabled(self):
+        with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.grab_banner") as mock_grab_banner, \
+                patch("mobile_network_scanner._resolve_hostname", return_value=""):
+            devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, grab_banners=False)
+
+        mock_grab_banner.assert_not_called()
+        assert all(d["banner"] == "" for d in devices)
+
 
 class TestScanAllSubnets:
     def test_merges_devices_from_every_subnet(self):
-        def fake_tcp_scan(subnet, timeout, ports, max_workers, mdns_timeout):
+        def fake_tcp_scan(subnet, timeout, ports, max_workers, mdns_timeout, grab_banners):
             return {
-                "192.168.1.0/24": [{"ip": "192.168.1.5", "hostname": "", "port": 80}],
-                "10.0.0.0/24": [{"ip": "10.0.0.9", "hostname": "nas.local", "port": 445}],
+                "192.168.1.0/24": [{"ip": "192.168.1.5", "hostname": "", "port": 80, "banner": ""}],
+                "10.0.0.0/24": [{"ip": "10.0.0.9", "hostname": "nas.local", "port": 445, "banner": ""}],
             }[subnet]
 
         with patch("mobile_network_scanner.tcp_scan", side_effect=fake_tcp_scan):

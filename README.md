@@ -165,6 +165,21 @@ smart-home device) — see `PORT_SERVICES` in the script for the full list.
 A device with no hostname and an unfamiliar port is worth cross-checking
 against your router's admin page (usually `192.168.1.1` in a browser).
 
+Each device's Banner column comes from `grab_banner()`, which reads
+whatever the open port sends back: an HTTP `Server:` header (sends a bare
+`HEAD /` for recognized web ports, or as a fallback probe on unrecognized
+ones if nothing arrives unprompted — many IoT admin UIs run HTTP on
+non-standard ports), or a protocol banner volunteered outright (SSH, FTP,
+etc.). Unlike mDNS/DNS-SD below, this needs nothing beyond the same plain
+`socket`/`ssl` primitives the rest of this script already uses, so it
+works on iOS with no platform restrictions — often enough on its own to
+identify a device with no hostname. Pass `--no-banners` to skip it for a
+faster scan.
+
+```
+python mobile_network_scanner.py --no-banners
+```
+
 Hostnames are resolved in this order, all built in with no extra
 dependency:
 1. **DNS-SD Cast service discovery** — for anything answering on the
