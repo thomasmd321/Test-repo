@@ -44,13 +44,17 @@ pip install psutil  # enables --all-subnets (interface enumeration)
 - Any device with a MAC address gets it looked up against the IEEE's public
   OUI registry to identify the manufacturer (e.g. `aa:bb:cc:dd:ee:ff` →
   `Apple, Inc.`). The registry (a few MB) is downloaded once and cached at
-  `~/.cache/network_scanner_oui.txt`; later runs reuse the cache instantly.
-  Pass `--no-vendor-lookup` to skip this entirely (e.g. for an offline scan,
-  or to avoid the first-run download).
+  `~/.cache/network_scanner_oui.txt`; every run after that reuses the cache
+  instantly, with no network call at all, until you ask otherwise. Pass
+  `--no-vendor-lookup` to skip this entirely (e.g. for an offline scan, or
+  to avoid the first-run download), or `--refresh-vendor-db` to force a
+  fresh download instead of reusing the cache (the registry does grow over
+  time, and nothing expires the cache automatically).
 
 ```
 python network_scanner.py --mdns-timeout 0.5
 python network_scanner.py --no-vendor-lookup
+python network_scanner.py --refresh-vendor-db
 ```
 
 ### `mobile_network_scanner.py`

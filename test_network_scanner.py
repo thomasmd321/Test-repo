@@ -88,7 +88,7 @@ class TestScanAllSubnets:
     def _patch_enrichment(self):
         return (
             patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices),
-            patch("network_scanner._attach_vendor_names", side_effect=lambda devices: devices),
+            patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices),
         )
 
     def test_merges_devices_from_every_subnet(self):
@@ -133,7 +133,7 @@ class TestScanAllSubnets:
 
         with patch("network_scanner.scan", side_effect=fake_scan), \
                 patch("network_scanner._resolve_missing_hostnames", side_effect=fake_resolve) as mock_resolve, \
-                patch("network_scanner._attach_vendor_names", side_effect=lambda devices: devices):
+                patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices):
             devices = ns.scan_all_subnets(["192.168.1.0/24", "10.0.0.0/24"], timeout=1.0, mdns_timeout=0.4)
 
         assert mock_resolve.call_count == 2
@@ -143,10 +143,18 @@ class TestScanAllSubnets:
     def test_attaches_vendors_once_over_final_merged_list(self):
         with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "x"}]), \
                 patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
-                patch("network_scanner._attach_vendor_names", side_effect=lambda devices: devices) as mock_vendor:
+                patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices) as mock_vendor:
             ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0)
 
         mock_vendor.assert_called_once()
+
+    def test_passes_refresh_vendor_db_through_to_attach_vendor_names(self):
+        with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "x"}]), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_vendor_names", side_effect=lambda devices, force_refresh=False: devices) as mock_vendor:
+            ns.scan_all_subnets(["192.168.1.0/24"], timeout=1.0, refresh_vendor_db=True)
+
+        assert mock_vendor.call_args.kwargs.get("force_refresh") is True
 
     def test_skips_vendor_lookup_when_disabled(self):
         with patch("network_scanner.scan", return_value=[{"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "x"}]), \
@@ -330,6 +338,70 @@ class TestMdnsServiceLookup:
         fake_sock.sendto.assert_called_once()
 
 
+class TestLoadOuiRegistry:
+    """lookup_mac_vendor()'s underlying loader, tested directly so each
+    scenario can control the cache-read outcome explicitly rather than
+    relying on whatever happens to be (or not be) on the test machine's
+    real filesystem at ~/.cache/network_scanner_oui.txt."""
+
+    def _fake_response(self, text: str) -> MagicMock:
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = text.encode("utf-8")
+        return response
+
+    def test_uses_cached_copy_without_downloading_when_not_forcing_refresh(self):
+        cached_text = "AA-BB-CC   (hex)\t\tCached Vendor\n"
+
+        with patch("network_scanner.Path.read_text", return_value=cached_text), \
+                patch("network_scanner.urllib.request.urlopen") as mock_urlopen:
+            result = ns._load_oui_registry()
+
+        assert result == cached_text
+        mock_urlopen.assert_not_called()
+
+    def test_downloads_when_no_cache_exists(self):
+        registry_text = "AA-BB-CC   (hex)\t\tExample Vendor\n"
+
+        with patch("network_scanner.Path.read_text", side_effect=OSError), \
+                patch("network_scanner.urllib.request.urlopen", return_value=self._fake_response(registry_text)), \
+                patch("network_scanner.Path.mkdir"), patch("network_scanner.Path.write_text") as mock_write:
+            result = ns._load_oui_registry()
+
+        assert result == registry_text
+        mock_write.assert_called_once_with(registry_text, encoding="utf-8")
+
+    def test_returns_none_when_no_cache_and_download_fails(self):
+        with patch("network_scanner.Path.read_text", side_effect=OSError), \
+                patch("network_scanner.urllib.request.urlopen", side_effect=urllib.error.URLError("offline")):
+            assert ns._load_oui_registry() is None
+
+    def test_force_refresh_downloads_even_when_cache_exists(self):
+        cached_text = "AA-BB-CC   (hex)\t\tStale Vendor\n"
+        fresh_text = "AA-BB-CC   (hex)\t\tFresh Vendor\n"
+
+        with patch("network_scanner.Path.read_text", return_value=cached_text) as mock_read, \
+                patch("network_scanner.urllib.request.urlopen", return_value=self._fake_response(fresh_text)), \
+                patch("network_scanner.Path.mkdir"), patch("network_scanner.Path.write_text") as mock_write:
+            result = ns._load_oui_registry(force_refresh=True)
+
+        assert result == fresh_text
+        mock_write.assert_called_once_with(fresh_text, encoding="utf-8")
+        # The cache is never even consulted up front when refreshing -
+        # only as a fallback if the download itself fails (see below).
+        mock_read.assert_not_called()
+
+    def test_force_refresh_falls_back_to_cache_when_download_fails(self):
+        cached_text = "AA-BB-CC   (hex)\t\tCached Vendor\n"
+
+        with patch("network_scanner.Path.read_text", return_value=cached_text), \
+                patch("network_scanner.urllib.request.urlopen", side_effect=urllib.error.URLError("offline")) as mock_urlopen:
+            result = ns._load_oui_registry(force_refresh=True)
+
+        assert result == cached_text
+        mock_urlopen.assert_called_once()
+
+
 class TestLookupMacVendor:
     def setup_method(self):
         # _oui_vendor_table is a module-level cache shared across calls -
@@ -340,51 +412,47 @@ class TestLookupMacVendor:
     def teardown_method(self):
         ns._oui_vendor_table = None
 
-    def test_downloads_and_parses_registry_on_first_use(self):
+    def test_parses_and_looks_up_a_known_prefix(self):
         registry_text = (
             "00-1A-11   (hex)\t\tGoogle, Inc.\n"
             "000000     (base 16)\t\tGoogle, Inc.\n"
             "\n"
             "AA-BB-CC   (hex)\t\tExample Vendor\n"
         )
-        fake_response = MagicMock()
-        fake_response.__enter__.return_value = fake_response
-        fake_response.read.return_value = registry_text.encode("utf-8")
 
-        with patch("network_scanner.urllib.request.urlopen", return_value=fake_response), \
-                patch("network_scanner.Path.mkdir"), patch("network_scanner.Path.write_text"):
+        with patch("network_scanner._load_oui_registry", return_value=registry_text):
             assert ns.lookup_mac_vendor("00:1a:11:22:33:44") == "Google, Inc."
             assert ns.lookup_mac_vendor("aa:bb:cc:dd:ee:ff") == "Example Vendor"
 
     def test_unknown_prefix_returns_empty_string(self):
-        with patch("network_scanner.urllib.request.urlopen", side_effect=urllib.error.URLError("offline")), \
-                patch("network_scanner.Path.read_text", side_effect=OSError):
+        with patch("network_scanner._load_oui_registry", return_value="AA-BB-CC   (hex)\t\tExample Vendor\n"):
             assert ns.lookup_mac_vendor("ff:ff:ff:ff:ff:ff") == ""
 
-    def test_falls_back_to_cache_when_download_fails(self):
-        cached_text = "AA-BB-CC   (hex)\t\tCached Vendor\n"
-
-        with patch("network_scanner.urllib.request.urlopen", side_effect=urllib.error.URLError("offline")), \
-                patch("network_scanner.Path.read_text", return_value=cached_text):
-            assert ns.lookup_mac_vendor("aa:bb:cc:11:22:33") == "Cached Vendor"
+    def test_registry_unavailable_returns_empty_string(self):
+        with patch("network_scanner._load_oui_registry", return_value=None):
+            assert ns.lookup_mac_vendor("aa:bb:cc:11:22:33") == ""
 
     def test_malformed_mac_returns_empty_string(self):
-        with patch("network_scanner.urllib.request.urlopen", side_effect=urllib.error.URLError("offline")), \
-                patch("network_scanner.Path.read_text", side_effect=OSError):
+        with patch("network_scanner._load_oui_registry", return_value="AA-BB-CC   (hex)\t\tExample Vendor\n"):
             assert ns.lookup_mac_vendor("not-a-mac") == ""
 
-    def test_only_fetches_registry_once_across_multiple_lookups(self):
-        registry_text = "AA-BB-CC   (hex)\t\tExample Vendor\n"
-        fake_response = MagicMock()
-        fake_response.__enter__.return_value = fake_response
-        fake_response.read.return_value = registry_text.encode("utf-8")
-
-        with patch("network_scanner.urllib.request.urlopen", return_value=fake_response) as mock_urlopen, \
-                patch("network_scanner.Path.mkdir"), patch("network_scanner.Path.write_text"):
+    def test_only_loads_registry_once_across_multiple_lookups(self):
+        with patch(
+            "network_scanner._load_oui_registry", return_value="AA-BB-CC   (hex)\t\tExample Vendor\n"
+        ) as mock_load:
             ns.lookup_mac_vendor("aa:bb:cc:11:22:33")
             ns.lookup_mac_vendor("aa:bb:cc:44:55:66")
 
-        mock_urlopen.assert_called_once()
+        mock_load.assert_called_once()
+
+    def test_passes_force_refresh_through_on_the_first_call_only(self):
+        with patch(
+            "network_scanner._load_oui_registry", return_value="AA-BB-CC   (hex)\t\tExample Vendor\n"
+        ) as mock_load:
+            ns.lookup_mac_vendor("aa:bb:cc:11:22:33", force_refresh=True)
+            ns.lookup_mac_vendor("aa:bb:cc:44:55:66", force_refresh=False)
+
+        mock_load.assert_called_once_with(force_refresh=True)
 
 
 class TestResolveMissingHostnames:
@@ -451,6 +519,14 @@ class TestAttachVendorNames:
 
         mock_lookup.assert_not_called()
         assert result[0]["vendor"] == "Already Known"
+
+    def test_passes_force_refresh_through_to_lookup_mac_vendor(self):
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}]
+
+        with patch("network_scanner.lookup_mac_vendor", return_value="Example Vendor") as mock_lookup:
+            ns._attach_vendor_names(devices, force_refresh=True)
+
+        mock_lookup.assert_called_once_with("aa:bb:cc:dd:ee:ff", force_refresh=True)
 
 
 class TestPing:

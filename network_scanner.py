@@ -137,6 +137,7 @@ def scan_all_subnets(
     timeout: float,
     mdns_timeout: float = 0.3,
     vendor_lookup: bool = True,
+    refresh_vendor_db: bool = False,
 ) -> List[Device]:
     """Run scan() over multiple subnets and merge the results into one list.
 
@@ -147,9 +148,11 @@ def scan_all_subnets(
             fallback (see _resolve_missing_hostnames()), run once per
             subnet since multicast traffic doesn't cross subnets.
         vendor_lookup: Whether to look up each device's MAC vendor via
-            the IEEE OUI registry (see _attach_vendor_names()) - this
-            downloads and caches a multi-megabyte registry on first use,
-            so pass False to skip it entirely (e.g. for an offline scan).
+            the IEEE OUI registry (see _attach_vendor_names()) - pass
+            False to skip it entirely (e.g. for an offline scan).
+        refresh_vendor_db: Force a fresh download of the OUI registry
+            instead of reusing the cached copy (see lookup_mac_vendor()).
+            Ignored if vendor_lookup is False.
 
     Returns:
         Every discovered device across all subnets, sorted by IP and
@@ -173,7 +176,7 @@ def scan_all_subnets(
         # Vendor lookup isn't subnet-scoped - it's a pure lookup against
         # a MAC already in hand - so it's cheaper and simpler to do once
         # over the final, de-duplicated list rather than per subnet.
-        devices = _attach_vendor_names(devices)
+        devices = _attach_vendor_names(devices, force_refresh=refresh_vendor_db)
 
     return devices
 
@@ -712,7 +715,8 @@ def mdns_service_lookup(service_type: str, timeout: float) -> Dict[str, str]:
 # The IEEE's public registry mapping each OUI (a MAC address's first 3
 # octets) to the organization it's assigned to. Downloaded once and
 # cached on disk, since it's a multi-megabyte file that rarely changes -
-# not something to re-fetch on every scan.
+# not something to re-fetch on every scan (see lookup_mac_vendor() for
+# how the cache is used, and --refresh-vendor-db for bypassing it).
 _OUI_REGISTRY_URL = "https://standards-oui.ieee.org/oui/oui.txt"
 _OUI_CACHE_PATH = Path.home() / ".cache" / "network_scanner_oui.txt"
 
@@ -726,18 +730,29 @@ _OUI_LINE_PATTERN = re.compile(r"^([0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2})
 _oui_vendor_table: Optional[Dict[str, str]] = None
 
 
-def _load_oui_registry(timeout: float = 5.0) -> Optional[str]:
-    """Fetch the IEEE OUI registry, downloading fresh or falling back to cache.
+def _load_oui_registry(timeout: float = 5.0, force_refresh: bool = False) -> Optional[str]:
+    """Load the IEEE OUI registry, from the disk cache if present or by downloading it.
 
     Args:
-        timeout: How long to wait for the download, in seconds, before
-            falling back to a cached copy.
+        timeout: How long to wait for a download, in seconds.
+        force_refresh: Skip the cache and download a fresh copy even if
+            one is already cached (see --refresh-vendor-db). The cache
+            is still used as a fallback if that download then fails.
 
     Returns:
-        The registry's raw text, or None if neither a fresh download
-        nor a previously cached copy is available (e.g. first run, no
-        internet access).
+        The registry's raw text, or None if no cached copy exists and
+        downloading one fails (e.g. first run, no internet access).
     """
+    if not force_refresh:
+        try:
+            # A cached copy is used as-is, with no re-download and no
+            # network call at all - the registry changes rarely enough
+            # that re-fetching it on every single scan (as earlier
+            # versions of this function did) was pure waste.
+            return _OUI_CACHE_PATH.read_text(encoding="utf-8")
+        except OSError:
+            pass  # No cache yet - fall through to downloading one.
+
     try:
         with urllib.request.urlopen(_OUI_REGISTRY_URL, timeout=timeout) as response:
             text = response.read().decode("utf-8", errors="replace")
@@ -746,24 +761,31 @@ def _load_oui_registry(timeout: float = 5.0) -> Optional[str]:
         return text
     except (urllib.error.URLError, OSError, ValueError):
         # No internet, DNS failure, firewall block, timeout, etc. - fall
-        # back to whatever a previous successful run cached, if anything.
+        # back to whatever a previous successful run cached, if anything
+        # (covers force_refresh's download failing, or the "no cache
+        # yet" branch above also hitting a network error).
         try:
             return _OUI_CACHE_PATH.read_text(encoding="utf-8")
         except OSError:
             return None
 
 
-def lookup_mac_vendor(mac: str) -> str:
+def lookup_mac_vendor(mac: str, force_refresh: bool = False) -> str:
     """Look up a MAC address's registered vendor via the IEEE OUI registry.
 
-    The registry is downloaded once per process (cached to disk across
-    runs) the first time this is called with a well-formed MAC, not at
-    import time - so scans that never see a MAC (or run with vendor
-    lookup disabled) never pay for it.
+    The registry is loaded once per process, not at import time, so
+    scans that never see a MAC (or run with vendor lookup disabled)
+    never pay for it. Once loaded it's kept in memory for the rest of
+    the process - force_refresh only affects the very first call within
+    a run; every subsequent lookup call reuses whatever that first call
+    loaded, refreshed or not.
 
     Args:
         mac: A colon- or dash-separated MAC address, e.g.
             "aa:bb:cc:dd:ee:ff".
+        force_refresh: Passed through to _load_oui_registry() on the
+            first call only (see above) - forces a fresh download
+            instead of reusing the disk cache.
 
     Returns:
         The registered vendor's name (e.g. "Google, Inc."), or "" if
@@ -773,7 +795,7 @@ def lookup_mac_vendor(mac: str) -> str:
     """
     global _oui_vendor_table
     if _oui_vendor_table is None:
-        text = _load_oui_registry()
+        text = _load_oui_registry(force_refresh=force_refresh)
         _oui_vendor_table = dict(_OUI_LINE_PATTERN.findall(text)) if text else {}
         # Keys are stored upper-cased for a case-insensitive lookup below.
         _oui_vendor_table = {prefix.upper(): vendor for prefix, vendor in _oui_vendor_table.items()}
@@ -827,7 +849,7 @@ def _resolve_missing_hostnames(devices: List[Device], mdns_timeout: float) -> Li
     return devices
 
 
-def _attach_vendor_names(devices: List[Device]) -> List[Device]:
+def _attach_vendor_names(devices: List[Device], force_refresh: bool = False) -> List[Device]:
     """Fill in "" vendors via the IEEE OUI registry, in place.
 
     Unlike hostname resolution, this isn't subnet-scoped - it's a pure
@@ -837,6 +859,10 @@ def _attach_vendor_names(devices: List[Device]) -> List[Device]:
 
     Args:
         devices: Scan results with a "mac" field to look up.
+        force_refresh: Passed through to lookup_mac_vendor() - forces a
+            fresh OUI registry download instead of reusing the cache
+            (see --refresh-vendor-db). Only the first call actually
+            triggers a load; see lookup_mac_vendor()'s docstring.
 
     Returns:
         The same devices, in the same order, with "vendor" filled in
@@ -845,7 +871,7 @@ def _attach_vendor_names(devices: List[Device]) -> List[Device]:
     for device in devices:
         mac = device.get("mac")
         if mac and not device.get("vendor"):
-            device["vendor"] = lookup_mac_vendor(mac)
+            device["vendor"] = lookup_mac_vendor(mac, force_refresh=force_refresh)
     return devices
 
 
@@ -978,6 +1004,11 @@ def main() -> None:
         help="Skip looking up each device's MAC vendor (avoids the first-run IEEE OUI registry download, e.g. for an offline scan)",
     )
     parser.add_argument(
+        "--refresh-vendor-db",
+        action="store_true",
+        help="Force a fresh download of the IEEE OUI registry instead of reusing the cached copy at ~/.cache/network_scanner_oui.txt",
+    )
+    parser.add_argument(
         "--watch",
         type=float,
         default=None,
@@ -1015,7 +1046,11 @@ def main() -> None:
 
         try:
             devices: List[Device] = scan_all_subnets(
-                subnets, args.timeout, mdns_timeout=args.mdns_timeout, vendor_lookup=not args.no_vendor_lookup
+                subnets,
+                args.timeout,
+                mdns_timeout=args.mdns_timeout,
+                vendor_lookup=not args.no_vendor_lookup,
+                refresh_vendor_db=args.refresh_vendor_db,
             )
         except RuntimeError as exc:
             # A missing required dependency (e.g. no `ping` binary at

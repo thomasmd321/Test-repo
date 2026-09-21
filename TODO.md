@@ -18,8 +18,11 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       independent of the known-devices registry already used for NEW
       markers.
 
-- [ ] **`--refresh-vendor-db` flag** (`network_scanner.py` only). Force a
+- [x] **`--refresh-vendor-db` flag** (`network_scanner.py` only). Force a
       fresh download of the IEEE OUI registry instead of using the
-      cached copy at `~/.cache/network_scanner_oui.txt` — useful since
-      the registry grows over time and the cache never expires on its
-      own right now.
+      cached copy at `~/.cache/network_scanner_oui.txt`.
+      Done: also fixed `_load_oui_registry()` to actually use the cache
+      by default (it previously re-downloaded on every single run,
+      contrary to what the README claimed, only falling back to cache
+      if that download failed) — now a cached copy is used as-is unless
+      `--refresh-vendor-db` is passed.
