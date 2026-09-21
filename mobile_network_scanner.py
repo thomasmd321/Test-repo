@@ -128,6 +128,17 @@ _MDNS_GROUP = ("224.0.0.251", 5353)
 _DNS_TYPE_PTR = 12
 _DNS_CLASS_IN = 1
 
+# mDNS's "QU" flag (RFC 6762 §5.4): setting the top bit of a question's
+# class field asks the responder to reply via ordinary unicast UDP,
+# straight back to the address/port the query came from, instead of its
+# default of multicasting the reply to every device on the link. This
+# matters a lot here: our socket below never joins the mDNS multicast
+# group or binds to port 5353 (both of which iOS restricts heavily for
+# third-party apps), so it can only ever receive a *unicast* reply on the
+# ephemeral port it queried from - a multicast-only reply would never
+# reach it, even from a device that answered correctly.
+_MDNS_QU_BIT = 0x8000
+
 
 def _encode_dns_name(name: str) -> bytes:
     """DNS-encode a dotted name (e.g. "72.1.168.192.in-addr.arpa") into the
@@ -200,7 +211,9 @@ def _build_mdns_ptr_query(qname: str) -> bytes:
     # flags=0 (a standard, non-response query), 1 question, 0 answers/
     # authority/additional records.
     header = struct.pack(">HHHHHH", 0, 0, 1, 0, 0, 0)
-    question = _encode_dns_name(qname) + struct.pack(">HH", _DNS_TYPE_PTR, _DNS_CLASS_IN)
+    # | _MDNS_QU_BIT: request a unicast reply - see its comment above for
+    # why this socket can't rely on the alternative (a multicast reply).
+    question = _encode_dns_name(qname) + struct.pack(">HH", _DNS_TYPE_PTR, _DNS_CLASS_IN | _MDNS_QU_BIT)
     return header + question
 
 
@@ -259,15 +272,20 @@ def mdns_reverse_lookup(ip: str, timeout: float) -> str:
     etc.) never register. Those devices instead announce a hostname over
     mDNS, a multicast UDP protocol every device on the local link can
     see and respond to, so this asks the same "who is this IP?" question
-    over multicast instead.
+    the same way.
 
-    This needs no special privileges: it's an ordinary UDP socket
-    joining a well-known multicast group, not a raw socket - the same
-    kind of client socket probe_host() already uses - so it works in
-    the same sandboxed environments this whole script targets. (On iOS
-    specifically, the OS may prompt for "Local Network" permission the
-    first time an app does this - if that's declined, this will just
-    time out and return "" like any other non-responding device.)
+    This needs no special privileges: it's an ordinary UDP socket, not a
+    raw one - the same kind of client socket probe_host() already uses -
+    so it works in the same sandboxed environments this whole script
+    targets. It deliberately never joins the mDNS multicast group or
+    binds to port 5353 (both restricted for third-party apps on iOS);
+    instead the query sets mDNS's "QU" bit (see _MDNS_QU_BIT) asking the
+    responder to reply via plain unicast UDP to our ephemeral port
+    instead of its default multicast reply, which this ordinary socket
+    can receive just fine. (On iOS specifically, the OS may still prompt
+    for "Local Network" permission the first time an app sends this kind
+    of query at all - if that's declined, this will just time out and
+    return "" like any other non-responding device.)
 
     Args:
         ip: The target host's IPv4 address.

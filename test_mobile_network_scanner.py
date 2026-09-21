@@ -82,7 +82,9 @@ class TestBuildMdnsPtrQuery:
 
         qtype, qclass = struct.unpack(">HH", query[offset:offset + 4])
         assert qtype == ms._DNS_TYPE_PTR
-        assert qclass == ms._DNS_CLASS_IN
+        # The QU bit must be set - see _MDNS_QU_BIT's comment for why
+        # this implementation depends on getting a unicast reply.
+        assert qclass == ms._DNS_CLASS_IN | ms._MDNS_QU_BIT
 
 
 def _build_fake_ptr_response(qname: str, answer_name: str, target: str) -> bytes:
