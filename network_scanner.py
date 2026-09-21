@@ -1804,6 +1804,167 @@ def export_results(devices: List[Device], path: Path, fieldnames: Sequence[str] 
         _export_json(devices, path)
 
 
+# --- Environment diagnostics (--doctor) ---
+#
+# Most of what this script uses has a documented fallback (no scapy? fall
+# back to ping sweep; no `arp` on PATH? just no MAC from that path; cache
+# dir not writable? tracking/vendor lookup silently don't persist) - which
+# is exactly why a limitation here is easy to only discover mid-scan, as a
+# blank column or a quietly-skipped feature, rather than a clear error.
+# --doctor surfaces the "why" behind those up front, in one pass, instead.
+
+def _has_raw_socket_privileges() -> bool:
+    """Best-effort check for whatever privilege ARP scanning (scapy) needs.
+
+    Not authoritative - the only real test is trying an ARP scan itself -
+    but root/administrator is required on every platform this script
+    targets, so it's a useful, cheap proxy.
+    """
+    if platform.system().lower() == "windows":
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return False
+
+
+def _check_python_version() -> Tuple[bool, str]:
+    return True, f"Running Python {sys.version.split()[0]}"
+
+
+def _check_scapy() -> Tuple[bool, str]:
+    try:
+        import scapy.all  # noqa: F401
+    except ImportError:
+        return False, "Not installed - ARP scanning unavailable, will fall back to ping sweep (pip install scapy to enable it)"
+    except BaseException as exc:
+        # Deliberately BaseException, not Exception: a broken scapy/
+        # cryptography install can raise pyo3_runtime.PanicException from
+        # its Rust extension on import, which subclasses BaseException
+        # directly rather than Exception - confirmed for real in one
+        # environment during testing, where a plain `except Exception`
+        # here let it crash straight through --doctor instead of being
+        # reported as the diagnostic finding it actually is.
+        return False, f"Installed but failed to import ({exc}) - will fall back to ping sweep"
+    return True, "Installed - ARP scanning is available"
+
+
+def _check_raw_socket_privileges() -> Tuple[bool, str]:
+    if _has_raw_socket_privileges():
+        return True, "Running with root/administrator privileges - ARP scanning can work"
+    return False, "Not running as root/administrator - ARP scanning will fail even with scapy installed, and will fall back to ping sweep"
+
+
+def _check_ping_binary() -> Tuple[bool, str]:
+    path = shutil.which("ping")
+    return (True, f"Found at {path}") if path else (False, "Not found on PATH - the ping-sweep fallback will not work at all")
+
+
+def _check_arp_binary() -> Tuple[bool, str]:
+    path = shutil.which("arp")
+    return (True, f"Found at {path}") if path else (
+        False, "Not found on PATH - MAC addresses won't be available from the ping-sweep fallback's ARP cache read"
+    )
+
+
+def _check_cache_writable() -> Tuple[bool, str]:
+    cache_dir = Path.home() / ".cache"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        probe = cache_dir / ".network_scanner_doctor_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        return False, f"{cache_dir} is not writable ({exc}) - known-devices tracking and the OUI vendor cache won't persist between runs"
+    return True, f"{cache_dir} is writable"
+
+
+def _check_oui_cache() -> Tuple[bool, str]:
+    if _OUI_CACHE_PATH.exists():
+        return True, f"Cached at {_OUI_CACHE_PATH} (use --refresh-vendor-db to force a fresh download)"
+    return True, f"Not downloaded yet - the first scan with vendor lookup enabled will fetch it to {_OUI_CACHE_PATH}"
+
+
+def _check_psutil() -> Tuple[bool, str]:
+    try:
+        import psutil  # noqa: F401
+    except ImportError:
+        return False, "Not installed - --all-subnets will only see the default-route subnet (pip install psutil to enable it)"
+    return True, "Installed - --all-subnets can see every local interface"
+
+
+def _check_mdns_multicast() -> Tuple[bool, str]:
+    """Try the same bind/join mobile_network_scanner.py's mDNS lookups depend on.
+
+    Desktop/Termux environments don't have iOS's Local Network Privacy
+    restriction, so this is expected to succeed here - a failure usually
+    means something else entirely (a firewall, an already-bound port).
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", 5353))
+            sock.setsockopt(
+                socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                struct.pack("4sl", socket.inet_aton("224.0.0.251"), socket.INADDR_ANY),
+            )
+    except OSError as exc:
+        return False, f"Can't bind port 5353 / join the mDNS multicast group ({exc}) - hostname resolution will fall back to reverse DNS only"
+    return True, "Can bind port 5353 and join the mDNS multicast group"
+
+
+_DOCTOR_CHECKS: Tuple[Tuple[str, object], ...] = (
+    ("Python version", _check_python_version),
+    ("scapy (ARP scanning)", _check_scapy),
+    ("Raw-socket privileges", _check_raw_socket_privileges),
+    ("`ping` binary", _check_ping_binary),
+    ("`arp` binary", _check_arp_binary),
+    ("Cache directory", _check_cache_writable),
+    ("OUI vendor registry", _check_oui_cache),
+    ("psutil (--all-subnets)", _check_psutil),
+    ("mDNS multicast", _check_mdns_multicast),
+)
+
+
+def run_doctor(color: bool = False) -> bool:
+    """Check this environment for everything network_scanner.py can use, and report it.
+
+    Doesn't change any behavior - a scan runs the same with or without
+    this - it just surfaces the reasoning behind a limitation you'd
+    otherwise only discover mid-scan (no MAC addresses because `arp`
+    isn't on PATH, vendor lookup silently blank because the cache
+    directory isn't writable, etc.).
+
+    Args:
+        color: Whether to colorize each check's pass/fail marker.
+
+    Returns:
+        True if every check passed, False if at least one failed. Most
+        failures have a documented fallback (see each check's own
+        message), so a scan may still work fine even when this reports
+        problems - it's diagnostic, not a hard prerequisite.
+    """
+    print("network_scanner.py environment check\n")
+
+    all_ok = True
+    for name, check in _DOCTOR_CHECKS:
+        ok, detail = check()
+        all_ok = all_ok and ok
+        marker = _colorize("OK  ", "green", color) if ok else _colorize("WARN", "yellow", color)
+        print(f"  [{marker}] {name}: {detail}")
+
+    print()
+    if all_ok:
+        print("Everything checks out.")
+    else:
+        print("Some checks reported a limitation - see above. Most have a fallback, so try a scan; it may work fine regardless.")
+    return all_ok
+
+
 def main() -> None:
     """CLI entry point: parse arguments, run the scan, and print a results table."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1823,6 +1984,11 @@ def main() -> None:
         default=None,
         metavar="IP",
         help="Skip the network scan and instead do a slow, thorough investigation of a single host: try many more ports, grab a banner from anything open, and resolve its hostname/vendor (see identify_device())",
+    )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Skip the network scan and instead check this environment for everything this script can use (scapy, ping/arp, cache writability, mDNS, etc.) - see run_doctor()",
     )
     parser.add_argument("--timeout", type=float, default=1.0, help="Timeout in seconds per host (default: 1.0)")
     parser.add_argument(
@@ -1917,10 +2083,19 @@ def main() -> None:
         metavar="FILE",
         help="Save this scan's results to FILE, independent of the known-devices registry - JSON, or CSV if FILE ends in .csv",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Print nothing at all for a scan with no NEW/CHG/missing/risky devices to report - useful for --watch under cron/systemd, so only an interesting run produces output",
+    )
     args = parser.parse_args()
 
     color = _use_color(args.no_color)
     ports = tuple(int(p) for p in args.ports.split(",")) if args.ports else None
+
+    if args.doctor:
+        ok = run_doctor(color=color)
+        raise SystemExit(0 if ok else 1)
 
     if args.identify:
         # A wholly different mode from everything below: one host,
@@ -1960,7 +2135,8 @@ def main() -> None:
 
     def run_once() -> None:
         """Scan once, mark/print NEW devices, and print the results table."""
-        print(f"Scanning {', '.join(subnets)} ...")
+        if not args.quiet:
+            print(f"Scanning {', '.join(subnets)} ...")
 
         try:
             devices: List[Device] = scan_all_subnets(
@@ -1985,7 +2161,8 @@ def main() -> None:
             raise SystemExit(1)
 
         if args.ipv6:
-            print("Also probing for IPv6 devices (multicast ping + NDP, Linux/macOS only) ...")
+            if not args.quiet:
+                print("Also probing for IPv6 devices (multicast ping + NDP, Linux/macOS only) ...")
             ipv6_devices = ipv6_neighbor_scan(timeout=args.ipv6_timeout)
             if not args.no_vendor_lookup:
                 ipv6_devices = _attach_vendor_names(ipv6_devices, force_refresh=args.refresh_vendor_db)
@@ -2005,7 +2182,8 @@ def main() -> None:
             devices = devices + ipv6_devices
 
         if not devices:
-            print("No devices found.")
+            if not args.quiet:
+                print("No devices found.")
             return
 
         # known_devices_path is passed explicitly (rather than relying
@@ -2030,6 +2208,13 @@ def main() -> None:
             else _find_missing_devices(devices, known_devices_path=_KNOWN_DEVICES_PATH)
         )
         labels = {} if args.no_track_devices else _load_labels(_KNOWN_DEVICES_PATH)
+        risky_devices = [d for d in devices if d.get("risky_ports")]
+
+        if args.quiet and not (any(is_new.values()) or port_changes or missing or risky_devices):
+            # Nothing worth reporting this run - true silence, not even
+            # the table header, so a cron/systemd job produces zero
+            # output on a boring scan instead of a full report every time.
+            return
 
         # A leading marker column (rather than reflowing every other
         # column's width) keeps a NEW device visually obvious without
@@ -2117,7 +2302,6 @@ def main() -> None:
                 line = f"  {device['ip']:<20} {_port_label(previous_port)} -> {_port_label(current_port)}"
                 print(_colorize(line, "yellow", color))
 
-        risky_devices = [d for d in devices if d.get("risky_ports")]
         if risky_devices:
             print(_colorize(f"\n⚠ {len(risky_devices)} device(s) exposing commonly-risky ports:", "yellow", color))
             all_risky_ports = set()
@@ -2135,10 +2319,12 @@ def main() -> None:
             print(f"\nWrote {len(devices)} device(s) to {args.output}.")
 
     if args.watch:
-        print(f"Watch mode: rescanning every {args.watch:g}s (Ctrl+C to stop).")
+        if not args.quiet:
+            print(f"Watch mode: rescanning every {args.watch:g}s (Ctrl+C to stop).")
         try:
             while True:
-                print(f"\n=== {datetime.now().isoformat(timespec='seconds')} ===")
+                if not args.quiet:
+                    print(f"\n=== {datetime.now().isoformat(timespec='seconds')} ===")
                 run_once()
                 time.sleep(args.watch)
         except KeyboardInterrupt:

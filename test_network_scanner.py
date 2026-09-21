@@ -378,6 +378,177 @@ class TestExportResults:
         assert header == "ip,mac,hostname,vendor,port,risky_ports"
 
 
+def _block_import(monkeypatch, blocked_name, exc):
+    """Make `import <blocked_name>` raise exc, passing every other import through."""
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == blocked_name:
+            raise exc
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+class TestCheckScapy:
+    def test_reports_ok_when_importable(self, monkeypatch):
+        # Mocks the import succeeding rather than relying on scapy
+        # actually being importable in whatever environment runs this
+        # test - it may not be (this sandbox's own scapy install is
+        # broken, which is exactly the case the next test covers).
+        import builtins
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "scapy.all":
+                return MagicMock()
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        ok, detail = ns._check_scapy()
+        assert ok is True
+        assert "available" in detail
+
+    def test_reports_not_installed_on_import_error(self, monkeypatch):
+        _block_import(monkeypatch, "scapy.all", ImportError("no module named scapy"))
+        ok, detail = ns._check_scapy()
+        assert ok is False
+        assert "Not installed" in detail
+
+    def test_reports_broken_install_on_a_baseexception_not_just_exception(self, monkeypatch):
+        # Regression test: a broken scapy/cryptography install can raise
+        # pyo3_runtime.PanicException from its Rust extension on import,
+        # which subclasses BaseException directly, not Exception -
+        # confirmed for real during testing, where `except Exception`
+        # here let it crash straight through --doctor instead of being
+        # reported as a diagnostic finding.
+        class FakePanic(BaseException):
+            pass
+
+        _block_import(monkeypatch, "scapy.all", FakePanic("Python API call failed"))
+        ok, detail = ns._check_scapy()
+        assert ok is False
+        assert "failed to import" in detail
+
+
+class TestCheckPsutil:
+    def test_reports_not_installed_on_import_error(self, monkeypatch):
+        _block_import(monkeypatch, "psutil", ImportError("no module named psutil"))
+        ok, detail = ns._check_psutil()
+        assert ok is False
+        assert "Not installed" in detail
+
+
+class TestCheckPingBinary:
+    def test_reports_found_path(self):
+        with patch("network_scanner.shutil.which", return_value="/sbin/ping"):
+            ok, detail = ns._check_ping_binary()
+        assert ok is True
+        assert "/sbin/ping" in detail
+
+    def test_reports_not_found(self):
+        with patch("network_scanner.shutil.which", return_value=None):
+            ok, detail = ns._check_ping_binary()
+        assert ok is False
+        assert "Not found" in detail
+
+
+class TestCheckArpBinary:
+    def test_reports_found_path(self):
+        with patch("network_scanner.shutil.which", return_value="/usr/sbin/arp"):
+            ok, detail = ns._check_arp_binary()
+        assert ok is True
+
+    def test_reports_not_found(self):
+        with patch("network_scanner.shutil.which", return_value=None):
+            ok, detail = ns._check_arp_binary()
+        assert ok is False
+
+
+class TestCheckCacheWritable:
+    def test_reports_writable_directory(self, tmp_path):
+        with patch("network_scanner.Path.home", return_value=tmp_path):
+            ok, detail = ns._check_cache_writable()
+        assert ok is True
+        assert str(tmp_path / ".cache") in detail
+
+    def test_reports_unwritable_directory(self, tmp_path):
+        with patch("network_scanner.Path.home", return_value=tmp_path), \
+                patch("network_scanner.Path.write_text", side_effect=OSError("Permission denied")):
+            ok, detail = ns._check_cache_writable()
+        assert ok is False
+        assert "not writable" in detail
+
+
+class TestCheckOuiCache:
+    def test_reports_cached_when_file_exists(self, tmp_path):
+        cache_path = tmp_path / "network_scanner_oui.txt"
+        cache_path.write_text("data", encoding="utf-8")
+        with patch("network_scanner._OUI_CACHE_PATH", cache_path):
+            ok, detail = ns._check_oui_cache()
+        assert ok is True
+        assert "Cached" in detail
+
+    def test_reports_not_downloaded_yet_when_missing(self, tmp_path):
+        cache_path = tmp_path / "network_scanner_oui.txt"
+        with patch("network_scanner._OUI_CACHE_PATH", cache_path):
+            ok, detail = ns._check_oui_cache()
+        assert ok is True
+        assert "Not downloaded yet" in detail
+
+
+class TestHasRawSocketPrivileges:
+    def test_true_when_root_on_unix(self):
+        with patch("network_scanner.platform.system", return_value="Linux"), \
+                patch("network_scanner.os.geteuid", return_value=0, create=True):
+            assert ns._has_raw_socket_privileges() is True
+
+    def test_false_when_not_root_on_unix(self):
+        with patch("network_scanner.platform.system", return_value="Linux"), \
+                patch("network_scanner.os.geteuid", return_value=1000, create=True):
+            assert ns._has_raw_socket_privileges() is False
+
+    def test_false_when_geteuid_unavailable(self):
+        with patch("network_scanner.platform.system", return_value="Linux"), \
+                patch("network_scanner.os.geteuid", side_effect=AttributeError, create=True):
+            assert ns._has_raw_socket_privileges() is False
+
+
+class TestCheckMdnsMulticast:
+    def test_reports_ok_when_bind_and_join_succeed(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        with patch("network_scanner.socket.socket", return_value=fake_sock):
+            ok, detail = ns._check_mdns_multicast()
+        assert ok is True
+
+    def test_reports_failure_when_bind_is_denied(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.bind.side_effect = OSError("Address already in use")
+        with patch("network_scanner.socket.socket", return_value=fake_sock):
+            ok, detail = ns._check_mdns_multicast()
+        assert ok is False
+        assert "Can't bind" in detail
+
+
+class TestRunDoctor:
+    def test_returns_true_when_every_check_passes(self, capsys):
+        checks = (("Check A", lambda: (True, "fine")), ("Check B", lambda: (True, "also fine")))
+        with patch("network_scanner._DOCTOR_CHECKS", checks):
+            assert ns.run_doctor(color=False) is True
+        assert "Everything checks out." in capsys.readouterr().out
+
+    def test_returns_false_when_any_check_fails(self, capsys):
+        checks = (("Check A", lambda: (True, "fine")), ("Check B", lambda: (False, "not fine")))
+        with patch("network_scanner._DOCTOR_CHECKS", checks):
+            assert ns.run_doctor(color=False) is False
+        out = capsys.readouterr().out
+        assert "not fine" in out
+        assert "Some checks reported a limitation" in out
+
+
 class TestDnsNameEncoding:
     def test_round_trips_a_simple_name(self):
         encoded = ns._encode_dns_name("72.1.168.192.in-addr.arpa")

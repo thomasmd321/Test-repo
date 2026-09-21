@@ -261,6 +261,98 @@ class TestExportResults:
         assert header == "ip,hostname,port,banner,risky_ports"
 
 
+class TestCheckLocalSubnet:
+    def test_reports_the_detected_subnet(self):
+        with patch("mobile_network_scanner.get_local_subnet", return_value="192.168.1.0/24"):
+            ok, detail = ms._check_local_subnet()
+        assert ok is True
+        assert "192.168.1.0/24" in detail
+
+    def test_reports_failure_when_detection_raises(self):
+        with patch("mobile_network_scanner.get_local_subnet", side_effect=OSError("no route")):
+            ok, detail = ms._check_local_subnet()
+        assert ok is False
+        assert "Couldn't detect" in detail
+
+
+class TestCheckTcpConnectivity:
+    def test_reports_ok_when_connect_succeeds(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            ok, detail = ms._check_tcp_connectivity()
+        assert ok is True
+
+    def test_reports_failure_when_connect_raises(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.connect.side_effect = OSError("timed out")
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            ok, detail = ms._check_tcp_connectivity()
+        assert ok is False
+        assert "Couldn't open" in detail
+
+
+class TestCheckCacheWritable:
+    def test_reports_writable_directory(self, tmp_path):
+        with patch("mobile_network_scanner.Path.home", return_value=tmp_path):
+            ok, detail = ms._check_cache_writable()
+        assert ok is True
+        assert str(tmp_path / ".cache") in detail
+
+    def test_reports_unwritable_directory(self, tmp_path):
+        with patch("mobile_network_scanner.Path.home", return_value=tmp_path), \
+                patch("mobile_network_scanner.Path.write_text", side_effect=OSError("Permission denied")):
+            ok, detail = ms._check_cache_writable()
+        assert ok is False
+        assert "not writable" in detail
+
+
+class TestCheckMdnsMulticast:
+    def test_reports_ok_when_send_succeeds(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            ok, detail = ms._check_mdns_multicast()
+        assert ok is True
+
+    def test_tolerates_bind_or_join_failure_and_still_tries_to_send(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.bind.side_effect = OSError("Address already in use")
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            ok, detail = ms._check_mdns_multicast()
+        assert ok is True
+        fake_sock.sendto.assert_called_once()
+
+    def test_reports_failure_when_send_is_denied(self):
+        # The real iOS failure mode: bind/join succeed, the send itself
+        # fails with OSError(65, 'No route to host').
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.sendto.side_effect = OSError(65, "No route to host")
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            ok, detail = ms._check_mdns_multicast()
+        assert ok is False
+        assert "Local Network Privacy" in detail
+
+
+class TestRunDoctor:
+    def test_returns_true_when_every_check_passes(self, capsys):
+        checks = (("Check A", lambda: (True, "fine")), ("Check B", lambda: (True, "also fine")))
+        with patch("mobile_network_scanner._DOCTOR_CHECKS", checks):
+            assert ms.run_doctor(color=False) is True
+        assert "Everything checks out." in capsys.readouterr().out
+
+    def test_returns_false_when_any_check_fails(self, capsys):
+        checks = (("Check A", lambda: (True, "fine")), ("Check B", lambda: (False, "not fine")))
+        with patch("mobile_network_scanner._DOCTOR_CHECKS", checks):
+            assert ms.run_doctor(color=False) is False
+        out = capsys.readouterr().out
+        assert "not fine" in out
+        assert "Some checks reported a limitation" in out
+
+
 class TestDnsNameEncoding:
     def test_round_trips_a_simple_name(self):
         encoded = ms._encode_dns_name("72.1.168.192.in-addr.arpa")

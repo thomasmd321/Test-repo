@@ -84,6 +84,54 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       comparing a CSV file against a JSON one - all three correctly
       reported the same added device and port change.
 
+- [x] **CI workflow.** 293 tests existed with nothing running them
+      automatically on push - a regression could land without anyone
+      noticing until the next manual `pytest` run.
+      Done: `.github/workflows/tests.yml`, running the full suite (plus
+      a compile-check of all three scripts) on every push/PR across
+      Python 3.9-3.12. Verified locally first: ran the actual suite
+      under 3.10 and 3.12 (this sandbox's default is 3.11), all passing,
+      before trusting the matrix to do the same in CI.
+
+- [x] **`--doctor` flag.** A diagnostic mode that checks the environment
+      up front (scapy, `ping`/`arp`, cache writability, mDNS, etc.)
+      instead of discovering a limitation mid-scan as a blank column or
+      a silently-skipped feature, in the same spirit as
+      `mdns_diagnostic.py`.
+      Done: `run_doctor()` + `--doctor` in both scripts, a list of
+      (name, check) pairs each reporting pass/fail with a detail
+      message and, for most, the fallback that kicks in when it fails.
+      Exits 0/1 based on whether every check passed. `mobile_network_scanner.py`'s
+      mDNS check runs the exact bind/join/send sequence its own mDNS
+      lookups depend on, so a failure there points straight at iOS's
+      Local Network Privacy restriction rather than something generic.
+      Real end-to-end testing against this actual (broken) sandbox
+      caught a genuine bug before it shipped: the scapy check's
+      `except Exception` didn't catch the Rust `pyo3_runtime.PanicException`
+      this sandbox's broken scapy/cryptography install actually raises
+      on import, since that exception subclasses `BaseException`
+      directly, not `Exception` - confirmed via `type(e).__mro__`, fixed
+      by broadening to `except BaseException`, and locked in with a
+      regression test using a fake `BaseException` subclass.
+
+- [x] **`--quiet` flag.** Suppress output for a scan with nothing to
+      report, so `--watch` under cron/systemd doesn't flood logs with a
+      full table every run - only an interesting one should produce
+      output at all.
+      Done: `--quiet` in both scripts, suppressing all narration
+      ("Scanning ...", the IPv6 probing line, the watch-mode timestamp
+      banner, "No devices found.") unconditionally, and the results
+      table/summary/reports entirely unless at least one device is NEW,
+      changed port, went missing, or exposes a risky port - computed the
+      same way the CHG/risky sections already do, just checked earlier
+      to decide whether to print anything at all. A risky-port signal
+      still fires this even with `--no-track-devices`, since that check
+      doesn't depend on the registry. Verified end-to-end against a real
+      loopback listener: first scan (NEW) printed the full report,
+      second scan with nothing changed produced truly zero output, third
+      scan after changing the listener's port printed the full report
+      again.
+
 - [x] ~~**TTL-based OS fingerprinting.**~~ Investigated and ruled out -
       not just for iOS, for any platform. The premise was wrong:
       `getsockopt(IPPROTO_IP, IP_TTL)` on a connected socket returns

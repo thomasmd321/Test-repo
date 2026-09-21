@@ -1247,6 +1247,126 @@ def export_results(devices: List[Device], path: Path, fieldnames: Sequence[str] 
         _export_json(devices, path)
 
 
+# --- Environment diagnostics (--doctor) ---
+#
+# This script's discovery techniques are already the most restricted set
+# either scanner uses (see the module docstring), so there's less to check
+# than network_scanner.py has - but the mDNS limitation in particular is
+# easy to only discover as "no hostname," rather than the platform
+# restriction it actually is (see mdns_diagnostic.py). --doctor surfaces
+# that up front, in one pass, instead.
+
+def _check_python_version() -> Tuple[bool, str]:
+    return True, f"Running Python {sys.version.split()[0]}"
+
+
+def _check_local_subnet() -> Tuple[bool, str]:
+    try:
+        subnet = get_local_subnet()
+    except OSError as exc:
+        return False, f"Couldn't detect the local subnet ({exc}) - pass one explicitly instead of relying on auto-detect"
+    return True, f"Detected {subnet}"
+
+
+def _check_tcp_connectivity() -> Tuple[bool, str]:
+    """Confirm this sandbox allows an ordinary outbound TCP connection at all.
+
+    Uses a well-known public address (Google's DNS) purely as a target
+    that's normally reachable - not a check of internet access for its
+    own sake. A failure here doesn't necessarily mean LAN scanning won't
+    work (a LAN with no WAN access is a legitimate setup), just that
+    something more fundamental than mDNS is worth ruling out first.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(2.0)
+            sock.connect(("8.8.8.8", 53))
+    except OSError as exc:
+        return False, f"Couldn't open an outbound TCP connection ({exc}) - could be a real network problem, or just no WAN access from this LAN"
+    return True, "Outbound TCP connections work"
+
+
+def _check_cache_writable() -> Tuple[bool, str]:
+    cache_dir = Path.home() / ".cache"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        probe = cache_dir / ".mobile_network_scanner_doctor_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        return False, f"{cache_dir} is not writable ({exc}) - known-devices tracking won't persist between runs"
+    return True, f"{cache_dir} is writable"
+
+
+def _check_mdns_multicast() -> Tuple[bool, str]:
+    """Try the exact bind/join/send sequence mdns_reverse_lookup()/mdns_service_lookup() depend on.
+
+    On iOS, the send is what actually fails - bind and join typically
+    succeed - with OSError(65, 'No route to host'), a platform
+    restriction (Apple's Local Network Privacy model) rather than
+    anything fixable in this script's Python code. See the module
+    docstring and mdns_diagnostic.py for the full story.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("", 5353))
+                sock.setsockopt(
+                    socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+                    struct.pack("4sl", socket.inet_aton(_MDNS_GROUP[0]), socket.INADDR_ANY),
+                )
+            except OSError:
+                pass  # Not fatal by itself - mdns_service_lookup() falls back to an ordinary socket too.
+            sock.sendto(_build_mdns_ptr_query("_services._dns-sd._udp.local"), _MDNS_GROUP)
+    except OSError as exc:
+        return False, f"Can't send to the mDNS multicast group ({exc}) - likely iOS's Local Network Privacy restriction, not fixable here"
+    return True, "Can send to the mDNS multicast group (a reply isn't guaranteed even so)"
+
+
+_DOCTOR_CHECKS: Tuple[Tuple[str, object], ...] = (
+    ("Python version", _check_python_version),
+    ("Local subnet detection", _check_local_subnet),
+    ("Outbound TCP connectivity", _check_tcp_connectivity),
+    ("Cache directory", _check_cache_writable),
+    ("mDNS multicast", _check_mdns_multicast),
+)
+
+
+def run_doctor(color: bool = False) -> bool:
+    """Check this environment for everything mobile_network_scanner.py can use, and report it.
+
+    Doesn't change any behavior - a scan runs the same with or without
+    this - it just surfaces the reasoning behind a limitation you'd
+    otherwise only discover mid-scan, most notably mDNS/Bonjour lookups
+    silently finding nothing on iOS.
+
+    Args:
+        color: Whether to colorize each check's pass/fail marker.
+
+    Returns:
+        True if every check passed, False if at least one failed - a
+        failed mDNS check in particular is an iOS platform restriction,
+        not something a scan retry or a code change here can fix (see
+        _check_mdns_multicast()).
+    """
+    print("mobile_network_scanner.py environment check\n")
+
+    all_ok = True
+    for name, check in _DOCTOR_CHECKS:
+        ok, detail = check()
+        all_ok = all_ok and ok
+        marker = _colorize("OK  ", "green", color) if ok else _colorize("WARN", "yellow", color)
+        print(f"  [{marker}] {name}: {detail}")
+
+    print()
+    if all_ok:
+        print("Everything checks out.")
+    else:
+        print("Some checks reported a limitation - see above. Most have a fallback, so try a scan; it may work fine regardless.")
+    return all_ok
+
+
 def main() -> None:
     """CLI entry point: parse arguments, run the scan, and print a results table."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1257,6 +1377,11 @@ def main() -> None:
     )
     parser.add_argument("--timeout", type=float, default=0.5, help="Timeout in seconds per port probe (default: 0.5)")
     parser.add_argument("--ports", type=str, default=None, help="Comma-separated TCP ports to probe (default: common ports)")
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Skip the network scan and instead check this environment for everything this script can use (local subnet detection, TCP connectivity, cache writability, mDNS) - see run_doctor()",
+    )
     parser.add_argument(
         "--mdns-timeout",
         type=float,
@@ -1316,9 +1441,18 @@ def main() -> None:
         metavar="FILE",
         help="Save this scan's results to FILE, independent of the known-devices registry - JSON, or CSV if FILE ends in .csv",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Print nothing at all for a scan with no NEW/CHG/missing/risky devices to report - useful for --watch under cron/systemd, so only an interesting run produces output",
+    )
     args = parser.parse_args()
 
     color = _use_color(args.no_color)
+
+    if args.doctor:
+        ok = run_doctor(color=color)
+        raise SystemExit(0 if ok else 1)
 
     # If the user didn't pass a subnet, auto-detect it from the device's
     # own network configuration instead of forcing them to look it up.
@@ -1344,7 +1478,8 @@ def main() -> None:
 
     def run_once() -> None:
         """Scan once, mark/print NEW devices, and print the results table."""
-        print(f"Scanning {', '.join(subnets)} on ports {ports} ...")
+        if not args.quiet:
+            print(f"Scanning {', '.join(subnets)} on ports {ports} ...")
 
         devices: List[Device] = scan_all_subnets(
             subnets,
@@ -1356,7 +1491,8 @@ def main() -> None:
         )
 
         if not devices:
-            print("No devices found.")
+            if not args.quiet:
+                print("No devices found.")
             return
 
         # known_devices_path is passed explicitly (rather than relying
@@ -1381,6 +1517,13 @@ def main() -> None:
             else _find_missing_devices(devices, known_devices_path=_KNOWN_DEVICES_PATH)
         )
         labels = {} if args.no_track_devices else _load_labels(_KNOWN_DEVICES_PATH)
+        risky_devices = [d for d in devices if d.get("risky_ports")]
+
+        if args.quiet and not (any(is_new.values()) or port_changes or missing or risky_devices):
+            # Nothing worth reporting this run - true silence, not even
+            # the table header, so a cron/systemd job produces zero
+            # output on a boring scan instead of a full report every time.
+            return
 
         # A leading marker column (rather than reflowing every other
         # column's width) keeps a NEW device visually obvious without
@@ -1458,7 +1601,6 @@ def main() -> None:
                 line = f"  {device['ip']:<18} {_port_label(previous_port)} -> {_port_label(current_port)}"
                 print(_colorize(line, "yellow", color))
 
-        risky_devices = [d for d in devices if d.get("risky_ports")]
         if risky_devices:
             print(_colorize(f"\n⚠ {len(risky_devices)} device(s) exposing commonly-risky ports:", "yellow", color))
             all_risky_ports = set()
@@ -1476,10 +1618,12 @@ def main() -> None:
             print(f"\nWrote {len(devices)} device(s) to {args.output}.")
 
     if args.watch:
-        print(f"Watch mode: rescanning every {args.watch:g}s (Ctrl+C to stop).")
+        if not args.quiet:
+            print(f"Watch mode: rescanning every {args.watch:g}s (Ctrl+C to stop).")
         try:
             while True:
-                print(f"\n=== {datetime.now().isoformat(timespec='seconds')} ===")
+                if not args.quiet:
+                    print(f"\n=== {datetime.now().isoformat(timespec='seconds')} ===")
                 run_once()
                 time.sleep(args.watch)
         except KeyboardInterrupt:

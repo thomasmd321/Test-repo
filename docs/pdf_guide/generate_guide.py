@@ -385,6 +385,8 @@ def build_pdf(desktop_diagram: Path, mobile_diagram: Path, terminal_mockup: Path
         crow("NEW / CHG / missing tracking", "Yes", "Yes"),
         crow("Export results", "--output FILE (CSV/JSON)", "--output FILE (CSV/JSON)"),
         crow("Custom device labels", "--set-label / --remove-label", "--set-label / --remove-label"),
+        crow("Environment diagnostics", "--doctor", "--doctor"),
+        crow("Quiet mode (cron/systemd)", "--quiet", "--quiet"),
     ]
     ct = Table(compare_data, colWidths=[1.5 * inch, 2.5 * inch, 2.5 * inch])
     ct_style = [
@@ -459,6 +461,7 @@ python3 network_scanner.py --output scan.json  # save results to a file"""))
         ("subnet", "Positional. CIDR range(s) to scan, comma-separated for more than one. Auto-detected if omitted."),
         ("--all-subnets", "Scan every local subnet this machine has an interface on (requires <font face=\"Courier\">pip install psutil</font>) instead of just the default route."),
         ("--identify IP", "Skip the network scan; do a slow, thorough single-host investigation instead (more ports, banner grabs, full hostname/vendor resolution)."),
+        ("--doctor", "Skip the network scan; check this environment for everything this script can use (scapy, ping/arp, cache writability, mDNS, etc.) and report it."),
         ("--timeout SECONDS", "Timeout per host (default: 1.0)."),
         ("--mdns-timeout SECONDS", "Timeout for the mDNS/DNS-SD hostname fallback (default: 0.3)."),
         ("--no-vendor-lookup", "Skip the IEEE OUI vendor lookup (avoids the first-run registry download)."),
@@ -476,6 +479,7 @@ python3 network_scanner.py --output scan.json  # save results to a file"""))
         ("--no-risky-ports", "Skip the risky-ports security check while keeping the general port probe."),
         ("--no-color", "Disable ANSI color output (also respects the <font face=\"Courier\">NO_COLOR</font> env var)."),
         ("--output FILE", "Save this scan's results to FILE as JSON, or CSV if it ends in <font face=\"Courier\">.csv</font>."),
+        ("--quiet", "Print nothing for a scan with no NEW/CHG/missing/risky devices - only an interesting run produces output (see --watch under cron/systemd)."),
     ]
     story.append(options_table(desktop_flags))
 
@@ -503,6 +507,7 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
     story.append(Paragraph("Options", styles["H2"]))
     mobile_flags = [
         ("subnet", "Positional. CIDR range(s) to scan, comma-separated for more than one. Auto-detected if omitted."),
+        ("--doctor", "Skip the network scan; check this environment for everything this script can use (subnet detection, TCP connectivity, cache writability, mDNS) and report it."),
         ("--timeout SECONDS", "Timeout per port probe (default: 0.5); also used for the banner-grab and risky-ports steps."),
         ("--ports LIST", "Comma-separated TCP ports to probe instead of the built-in default list."),
         ("--mdns-timeout SECONDS", "Timeout for the mDNS/Bonjour hostname fallback (default: 0.3)."),
@@ -515,6 +520,7 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
         ("--no-risky-ports", "Skip the risky-ports security check while keeping the general port probe."),
         ("--no-color", "Disable ANSI color output (also respects the <font face=\"Courier\">NO_COLOR</font> env var)."),
         ("--output FILE", "Save this scan's results to FILE as JSON, or CSV if it ends in <font face=\"Courier\">.csv</font>."),
+        ("--quiet", "Print nothing for a scan with no NEW/CHG/missing/risky devices - only an interesting run produces output (see --watch under cron/systemd)."),
     ]
     story.append(options_table(mobile_flags))
 
@@ -637,6 +643,43 @@ python3 scan_diff.py --no-color old.json new.json"""))
         "compared whenever both files happen to have them. A device is matched across the two "
         "files by MAC when present, falling back to IP — the same identity rule "
         "network_scanner.py's own known-devices tracking uses.", styles["Body"]))
+
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ Quiet mode & --doctor
+    story.append(Paragraph("7. Quiet mode and environment diagnostics", styles["H1"]))
+    story.append(KeepTogether([
+        Paragraph("--quiet", styles["H2"]),
+        Paragraph(
+            "Suppresses everything — even the scan's own “Scanning...” line — for a run "
+            "with nothing to report: no NEW devices, no port changes, no missing devices, and no "
+            "risky ports. As soon as one of those is true, the full report prints exactly as it "
+            "would without --quiet. Meant for --watch under cron/systemd, where a boring rescan "
+            "producing zero output (rather than a full table every time) is what makes “did "
+            "anything happen” easy to grep for or alert on.", styles["Body"]),
+        code_block("""python3 network_scanner.py --watch 300 --quiet
+python3 mobile_network_scanner.py --watch 300 --quiet"""),
+    ]))
+
+    story.append(Spacer(1, 0.1 * inch))
+
+    story.append(KeepTogether([
+        Paragraph("--doctor", styles["H2"]),
+        Paragraph(
+            "Skips the network scan and instead checks this environment for everything the "
+            "script can use — scapy, ping/arp, cache-directory writability, mDNS multicast, and "
+            "so on — reporting each with a clear pass/fail and, for most, the fallback that "
+            "kicks in when it fails. Exits 0 if every check passed, 1 otherwise, so it's usable "
+            "as a pre-flight check in a script.", styles["Body"]),
+        code_block("""python3 network_scanner.py --doctor
+python3 mobile_network_scanner.py --doctor"""),
+        Paragraph(
+            "A failed check doesn't necessarily mean a scan will fail — most have a documented "
+            "fallback (no arp on PATH just means no MAC from that path, not a crash). The one "
+            "exception: a failed mDNS check on mobile_network_scanner.py almost always means "
+            "iOS's Local Network Privacy restriction (see mdns_diagnostic.py), which no retry or "
+            "code change here can fix.", styles["BodySmall"]),
+    ]))
 
     doc = SimpleDocTemplate(
         str(out_path),

@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # All three scanner scripts mock out every network/subprocess call
+        # in their tests, so this needs nothing beyond the stdlib + pytest -
+        # no scapy/psutil, no real network access, no elevated privileges.
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Compile-check every script
+        run: python -m py_compile network_scanner.py mobile_network_scanner.py scan_diff.py
+
+      - name: Run tests
+        run: pytest -v
