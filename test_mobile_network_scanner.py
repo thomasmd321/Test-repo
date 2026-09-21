@@ -119,6 +119,124 @@ class TestExtractPtrHostname:
         assert ms._extract_ptr_hostname(b"\x00\x01", "72.1.168.192.in-addr.arpa") == ""
 
 
+def _build_a_record(name: str, ip: str) -> bytes:
+    """Build a single raw DNS A record, for tests."""
+    return (
+        ms._encode_dns_name(name)
+        + struct.pack(">HH", ms._DNS_TYPE_A, ms._DNS_CLASS_IN)
+        + struct.pack(">I", 120)  # TTL
+        + struct.pack(">H", 4)  # RDLENGTH: an IPv4 address is 4 bytes
+        + socket.inet_aton(ip)
+    )
+
+
+def _build_srv_record(instance_name: str, target: str, port: int = 8009) -> bytes:
+    """Build a single raw DNS SRV record, for tests."""
+    rdata = struct.pack(">HHH", 0, 0, port) + ms._encode_dns_name(target)  # priority, weight, port, target
+    return (
+        ms._encode_dns_name(instance_name)
+        + struct.pack(">HH", ms._DNS_TYPE_SRV, ms._DNS_CLASS_IN)
+        + struct.pack(">I", 120)  # TTL
+        + struct.pack(">H", len(rdata))
+        + rdata
+    )
+
+
+def _build_fake_service_response(*records: bytes, answer_count: int = 0, additional_count: int = 0) -> bytes:
+    """Wrap prebuilt records in a minimal mDNS response header, for tests."""
+    header = struct.pack(">HHHHHH", 0, 0x8400, 0, answer_count, 0, additional_count)
+    return header + b"".join(records)
+
+
+class TestCollectServiceRecords:
+    def test_collects_a_and_srv_records_regardless_of_section(self):
+        a_record = _build_a_record("Chromecast-abc123.local", "192.168.1.72")
+        srv_record = _build_srv_record("Living Room TV._googlecast._tcp.local", "Chromecast-abc123.local")
+        # A real response often splits these: SRV as an answer, its
+        # supporting A record as "additional" - exercise that split.
+        message = _build_fake_service_response(srv_record, a_record, answer_count=1, additional_count=1)
+
+        host_to_ip: dict = {}
+        instance_to_host: dict = {}
+        ms._collect_service_records(message, host_to_ip, instance_to_host)
+
+        assert host_to_ip == {"chromecast-abc123.local": "192.168.1.72"}
+        assert instance_to_host == {"Living Room TV._googlecast._tcp.local": "chromecast-abc123.local"}
+
+    def test_ignores_unrelated_record_types(self):
+        ptr_record = _build_fake_ptr_response("x", "x", "y")  # Includes its own header - just reuse the answer bytes.
+        # Strip the fake header this helper adds, since we only want the
+        # record bytes to feed into _collect_service_records directly.
+        message = _build_fake_service_response(ptr_record[12:], answer_count=1)
+
+        host_to_ip: dict = {}
+        instance_to_host: dict = {}
+        ms._collect_service_records(message, host_to_ip, instance_to_host)
+
+        assert host_to_ip == {}
+        assert instance_to_host == {}
+
+
+class TestMdnsServiceLookup:
+    def test_joins_srv_and_a_records_into_ip_to_name_map(self):
+        a_record = _build_a_record("Chromecast-abc123.local", "192.168.1.72")
+        srv_record = _build_srv_record("Living Room TV._googlecast._tcp.local", "Chromecast-abc123.local")
+        response = _build_fake_service_response(srv_record, a_record, answer_count=2)
+
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recvfrom.side_effect = [(response, ("192.168.1.72", 5353)), socket.timeout]
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            result = ms.mdns_service_lookup("_googlecast._tcp.local", timeout=0.2)
+
+        assert result == {"192.168.1.72": "Living Room TV"}
+
+    def test_combines_records_split_across_multiple_packets(self):
+        srv_record = _build_srv_record("Living Room TV._googlecast._tcp.local", "Chromecast-abc123.local")
+        a_record = _build_a_record("Chromecast-abc123.local", "192.168.1.72")
+        srv_packet = _build_fake_service_response(srv_record, answer_count=1)
+        a_packet = _build_fake_service_response(a_record, answer_count=1)
+
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recvfrom.side_effect = [(srv_packet, ("x", 5353)), (a_packet, ("x", 5353)), socket.timeout]
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            result = ms.mdns_service_lookup("_googlecast._tcp.local", timeout=0.2)
+
+        assert result == {"192.168.1.72": "Living Room TV"}
+
+    def test_omits_instance_with_no_matching_a_record(self):
+        srv_record = _build_srv_record("Living Room TV._googlecast._tcp.local", "Chromecast-abc123.local")
+        response = _build_fake_service_response(srv_record, answer_count=1)
+
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recvfrom.side_effect = [(response, ("x", 5353)), socket.timeout]
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            result = ms.mdns_service_lookup("_googlecast._tcp.local", timeout=0.2)
+
+        assert result == {}
+
+    def test_returns_empty_dict_when_nothing_answers(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recvfrom.side_effect = socket.timeout
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            assert ms.mdns_service_lookup("_googlecast._tcp.local", timeout=0.01) == {}
+
+    def test_returns_empty_dict_when_multicast_send_is_denied(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.sendto.side_effect = OSError("Local network access denied")
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            assert ms.mdns_service_lookup("_googlecast._tcp.local", timeout=0.5) == {}
+
+
 class TestMdnsReverseLookup:
     def test_returns_hostname_from_first_matching_response(self):
         qname = "72.1.168.192.in-addr.arpa"
@@ -194,22 +312,53 @@ class TestTcpScan:
         assert set(ips) == {"192.168.1.2", "192.168.1.10"}
 
     def test_attaches_hostname_and_matched_port_when_available(self):
-        with patch("mobile_network_scanner.probe_host", return_value=8009), \
+        # Port 80, not 8009 (the Chromecast port), so this doesn't also
+        # trigger the Cast-service-discovery path - see TestTcpScan's
+        # cast-specific tests below for that.
+        with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner._resolve_hostname", return_value="phone.local"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
-        assert {"ip": "192.168.1.1", "hostname": "phone.local", "port": 8009} in devices
+        assert {"ip": "192.168.1.1", "hostname": "phone.local", "port": 80} in devices
 
     def test_falls_back_to_mdns_when_reverse_dns_has_no_hostname(self):
         # Exercises the real _resolve_hostname (not mocked out), so this
         # confirms tcp_scan actually wires the mDNS fallback in, not just
-        # that _resolve_hostname works in isolation.
-        with patch("mobile_network_scanner.probe_host", return_value=8009), \
+        # that _resolve_hostname works in isolation. Port 80 avoids also
+        # triggering Cast service discovery (tested separately below).
+        with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner.socket.gethostbyaddr", side_effect=socket.gaierror), \
-                patch("mobile_network_scanner.mdns_reverse_lookup", return_value="Chromecast-abc123.local"):
+                patch("mobile_network_scanner.mdns_reverse_lookup", return_value="some-device.local"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, mdns_timeout=0.2)
 
-        assert all(d["hostname"] == "Chromecast-abc123.local" for d in devices)
+        assert all(d["hostname"] == "some-device.local" for d in devices)
+
+    def test_uses_cast_service_name_when_chromecast_port_matches(self):
+        with patch("mobile_network_scanner.probe_host", return_value=8009), \
+                patch("mobile_network_scanner.mdns_service_lookup", return_value={"192.168.1.1": "Living Room TV"}), \
+                patch("mobile_network_scanner._resolve_hostname", return_value="should-not-be-used"):
+            devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, mdns_timeout=0.2)
+
+        assert {"ip": "192.168.1.1", "hostname": "Living Room TV", "port": 8009} in devices
+
+    def test_falls_back_to_resolve_hostname_when_cast_lookup_has_no_name_for_ip(self):
+        # mdns_service_lookup() might name some Cast devices on the
+        # subnet but not this particular one (e.g. its A record arrived
+        # too late) - it should still get a chance via the normal path.
+        with patch("mobile_network_scanner.probe_host", return_value=8009), \
+                patch("mobile_network_scanner.mdns_service_lookup", return_value={}), \
+                patch("mobile_network_scanner._resolve_hostname", return_value="fallback.local"):
+            devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, mdns_timeout=0.2)
+
+        assert all(d["hostname"] == "fallback.local" for d in devices)
+
+    def test_skips_cast_lookup_when_no_chromecast_port_present(self):
+        with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.mdns_service_lookup") as mock_cast_lookup, \
+                patch("mobile_network_scanner._resolve_hostname", return_value=""):
+            ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
+
+        mock_cast_lookup.assert_not_called()
 
     def test_missing_hostname_defaults_to_empty_string(self):
         with patch("mobile_network_scanner.probe_host", return_value=80), \

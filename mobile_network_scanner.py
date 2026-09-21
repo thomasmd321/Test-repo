@@ -12,12 +12,15 @@ It will not find hosts with none of the probed ports open or reachable
 (e.g. a phone with all inbound connections blocked), so it's a best-effort
 discovery method, not a guarantee of completeness the way an ARP scan is.
 
-Hostnames come from reverse DNS first, falling back to mDNS/Bonjour (see
-mdns_reverse_lookup()) for devices - Chromecasts, smart speakers,
-printers, and most other consumer/IoT gear - that never register a PTR
-record but do announce a ".local" name over multicast. This needs no
-external library (nothing like `zeroconf` reliably builds in these
-sandboxes); it speaks just enough of the mDNS wire protocol directly.
+Hostnames come from, in order: DNS-SD Cast service discovery (see
+mdns_service_lookup()) for anything answering on the Chromecast control
+port, since Google's Cast devices generally skip the next method; plain
+reverse DNS; then mDNS/Bonjour reverse lookup (see mdns_reverse_lookup())
+for devices - smart speakers, printers, and most other consumer/IoT gear
+- that never register a PTR record but do announce a ".local" name over
+multicast. None of this needs an external library (nothing like
+`zeroconf` reliably builds in these sandboxes); it speaks just enough of
+the mDNS/DNS-SD wire protocol directly.
 
 Note on scanning multiple subnets: unlike network_scanner.py, this script
 can't auto-detect every subnet a device is attached to - listing network
@@ -125,8 +128,21 @@ _MDNS_GROUP = ("224.0.0.251", 5353)
 # DNS record type numbers used below (from RFC 1035); mDNS reuses the
 # ordinary DNS wire format, just delivered over multicast instead of to a
 # configured resolver.
+_DNS_TYPE_A = 1
 _DNS_TYPE_PTR = 12
+_DNS_TYPE_SRV = 33
 _DNS_CLASS_IN = 1
+
+# The DNS-SD (RFC 6763) service type Chromecasts and other Google Cast
+# devices advertise themselves under - this is the exact query the Google
+# Home app and Chrome's "Cast" button send to find them, and unlike
+# reverse address (in-addr.arpa) lookups, it's not optional: a Cast
+# device that didn't answer this wouldn't be discoverable by anything.
+_CAST_SERVICE_TYPE = "_googlecast._tcp.local"
+# The TCP port a Cast device answers its control protocol on - used only
+# to decide whether it's worth asking mdns_service_lookup() at all (see
+# tcp_scan()), not for anything protocol-related.
+_CAST_CONTROL_PORT = 8009
 
 # mDNS's "QU" flag (RFC 6762 §5.4): setting the top bit of a question's
 # class field asks the responder to reply via ordinary unicast UDP,
@@ -217,6 +233,57 @@ def _build_mdns_ptr_query(qname: str) -> bytes:
     return header + question
 
 
+def _iter_mdns_records(message: bytes):
+    """Yield every resource record in an mDNS message, across all sections.
+
+    A DNS/mDNS message has three record sections after its questions
+    (answer, authority, additional), and related records for the same
+    service are routinely split across them - a device might put its PTR
+    answer in "answer" but its supporting SRV/A records in "additional".
+    Most one-shot lookups don't care which section a record came from,
+    only what type it is, so this walks all of them as a single stream
+    rather than making every caller re-implement that traversal.
+
+    Args:
+        message: A raw mDNS message, as received over the socket.
+
+    Yields:
+        (name, record_type, rdata_offset, rdata_length) for each record,
+        in wire order. rdata_offset is an offset into message where that
+        record's data starts - decode it with _decode_dns_name() for a
+        name-typed record (PTR/SRV/CNAME/...) or read it directly for a
+        fixed-format one (A/AAAA/...).
+    """
+    try:
+        question_count, answer_count, authority_count, additional_count = struct.unpack(">HHHH", message[4:12])
+    except struct.error:
+        return  # Too short to even be a valid DNS header - nothing to yield.
+
+    offset = 12  # DNS header is always exactly 12 bytes.
+
+    # Skip past the question section (present when this "response" is
+    # actually another device's query, which we'll see plenty of on a
+    # shared multicast channel) to reach the answers.
+    for _ in range(question_count):
+        _name, offset = _decode_dns_name(message, offset)
+        offset += 4  # QTYPE + QCLASS, 2 bytes each.
+
+    for _ in range(answer_count + authority_count + additional_count):
+        try:
+            name, offset = _decode_dns_name(message, offset)
+            record_type, _record_class = struct.unpack(">HH", message[offset:offset + 4])
+            offset += 4
+            offset += 4  # TTL (4 bytes) - not needed for a one-shot lookup.
+            rdata_length = struct.unpack(">H", message[offset:offset + 2])[0]
+            offset += 2
+        except (struct.error, IndexError):
+            return  # Malformed/truncated record - stop rather than guess.
+
+        rdata_offset = offset
+        offset += rdata_length
+        yield name, record_type, rdata_offset, rdata_length
+
+
 def _extract_ptr_hostname(message: bytes, qname: str) -> str:
     """Pull a matching PTR record's target hostname out of an mDNS response.
 
@@ -232,35 +299,42 @@ def _extract_ptr_hostname(message: bytes, qname: str) -> str:
         with its trailing root dot stripped, or "" if this message has
         no PTR answer for qname.
     """
-    try:
-        question_count, answer_count = struct.unpack(">HH", message[4:8])
-    except struct.error:
-        return ""  # Too short to even be a valid DNS header - ignore it.
-
-    offset = 12  # DNS header is always exactly 12 bytes.
-
-    # Skip past the question section (present when this "response" is
-    # actually another device's query, which we'll see plenty of on a
-    # shared multicast channel) to reach the answers.
-    for _ in range(question_count):
-        _name, offset = _decode_dns_name(message, offset)
-        offset += 4  # QTYPE + QCLASS, 2 bytes each.
-
-    for _ in range(answer_count):
-        name, offset = _decode_dns_name(message, offset)
-        record_type, _record_class = struct.unpack(">HH", message[offset:offset + 4])
-        offset += 4
-        offset += 4  # TTL (4 bytes) - not needed for a one-shot lookup.
-        rdata_length = struct.unpack(">H", message[offset:offset + 2])[0]
-        offset += 2
-        rdata_offset = offset
-        offset += rdata_length
-
+    for name, record_type, rdata_offset, _rdata_length in _iter_mdns_records(message):
         if record_type == _DNS_TYPE_PTR and name.lower().rstrip(".") == qname.lower().rstrip("."):
             hostname, _ = _decode_dns_name(message, rdata_offset)
             return hostname.rstrip(".")
 
     return ""
+
+
+def _collect_service_records(message: bytes, host_to_ip: Dict[str, str], instance_to_host: Dict[str, str]) -> None:
+    """Pull A and SRV records for a DNS-SD service out of an mDNS response.
+
+    A full "who provides this service, and at what address?" answer is
+    normally split across three record types, which is why this fills in
+    two separate maps rather than returning one result directly - the
+    caller combines them (see mdns_service_lookup()) once every response
+    packet has been read, since a device's A and SRV records may not
+    even arrive in the same packet.
+
+    Args:
+        message: A raw mDNS response packet.
+        host_to_ip: Updated in place: hostname (from an A record's own
+            name) -> its IPv4 address.
+        instance_to_host: Updated in place: service instance name (from
+            an SRV record's own name, e.g.
+            "Living Room TV._googlecast._tcp.local") -> the hostname it
+            runs on (SRV's "target" field).
+    """
+    for name, record_type, rdata_offset, rdata_length in _iter_mdns_records(message):
+        if record_type == _DNS_TYPE_A and rdata_length == 4:
+            host_to_ip[name.lower().rstrip(".")] = socket.inet_ntoa(message[rdata_offset:rdata_offset + 4])
+        elif record_type == _DNS_TYPE_SRV:
+            # SRV rdata is priority(2) + weight(2) + port(2), then the
+            # target hostname - we only need the target, not the port,
+            # since tcp_scan() already tells us which port answered.
+            target, _ = _decode_dns_name(message, rdata_offset + 6)
+            instance_to_host[name.rstrip(".")] = target.lower().rstrip(".")
 
 
 def mdns_reverse_lookup(ip: str, timeout: float) -> str:
@@ -332,6 +406,83 @@ def mdns_reverse_lookup(ip: str, timeout: float) -> str:
             hostname = _extract_ptr_hostname(message, qname)
             if hostname:
                 return hostname
+
+
+def mdns_service_lookup(service_type: str, timeout: float) -> Dict[str, str]:
+    """Discover every device advertising service_type, mapped by IP address.
+
+    mdns_reverse_lookup() asks "what's your name?" directly, which relies
+    on a device having registered a reverse (in-addr.arpa) PTR record -
+    an optional feature many device vendors, Google's Cast stack among
+    them, simply don't implement. What virtually every mDNS-discoverable
+    device *does* implement is DNS-SD (RFC 6763) service advertisement,
+    since it's how anything finds them in the first place - a Chromecast
+    that didn't answer "who offers _googlecast._tcp.local?" wouldn't be
+    castable to from any app. This asks that question instead, once for
+    the whole subnet rather than once per IP.
+
+    A full answer needs three record types, usually spread across
+    several response packets: a PTR record per device (name ->
+    "<friendly name>.<service_type>"), an SRV record per instance
+    (that instance name -> the hostname it runs on), and an A record
+    per hostname (-> its IP). This collects all of them across every
+    response received before the deadline, then joins the three maps
+    together at the end.
+
+    Args:
+        service_type: A DNS-SD service type, e.g. "_googlecast._tcp.local"
+            (see _CAST_SERVICE_TYPE).
+        timeout: How long to keep listening for responses, in seconds.
+            Unlike mdns_reverse_lookup(), this doesn't return as soon as
+            one answer arrives - every matching device on the network
+            answers the same broadcast-style query, so cutting off early
+            would mean only ever finding the first (or fastest) one.
+
+    Returns:
+        A dict of {ip_address: friendly_name}, e.g.
+        {"192.168.1.72": "Living Room TV"}, covering only the devices
+        that answered and whose PTR/SRV/A records were all received
+        before the deadline. Devices that don't offer this service
+        simply don't appear - this is not an error.
+    """
+    query = _build_mdns_ptr_query(service_type)
+    deadline = time.monotonic() + timeout
+
+    host_to_ip: Dict[str, str] = {}
+    instance_to_host: Dict[str, str] = {}
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+        try:
+            sock.sendto(query, _MDNS_GROUP)
+        except OSError:
+            return {}
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            try:
+                message, _sender = sock.recvfrom(4096)
+            except OSError:
+                break
+            _collect_service_records(message, host_to_ip, instance_to_host)
+
+    suffix = "." + service_type.lower().rstrip(".")
+    results: Dict[str, str] = {}
+    for instance_name, host in instance_to_host.items():
+        ip = host_to_ip.get(host)
+        if ip is None:
+            # Its SRV record arrived, but not (yet, or ever) the matching
+            # A record - can't map it to an IP, so skip it rather than
+            # guess.
+            continue
+        lower_instance = instance_name.lower()
+        friendly_name = instance_name[: -len(suffix)] if lower_instance.endswith(suffix) else instance_name
+        results[ip] = friendly_name
+
+    return results
 
 
 def _resolve_hostname(ip: str, mdns_timeout: float) -> str:
@@ -413,9 +564,10 @@ def tcp_scan(
 
     Returns:
         Discovered devices sorted by IP address, each with "hostname"
-        populated from reverse DNS or, failing that, mDNS (or "" if
-        neither resolved it) and "port" set to whichever probed port
-        answered first.
+        populated from Cast service discovery (for Chromecast-port
+        devices), reverse DNS, or mDNS reverse lookup - whichever found
+        one first, or "" if none did - and "port" set to whichever
+        probed port answered first.
     """
     # strict=False: subnet may be given as a host address (e.g. from
     # get_local_subnet()) rather than a "clean" network address.
@@ -439,7 +591,24 @@ def tcp_scan(
             if port is not None:
                 matched_ports[str(ip)] = port
 
+    # Chromecasts (and other Google Cast devices) generally don't answer
+    # mdns_reverse_lookup()'s reverse-PTR question - that's an optional
+    # part of the mDNS spec, and Google's Cast stack doesn't implement
+    # it - but they always answer DNS-SD's "who offers this service?"
+    # question, since that's the actual mechanism every casting app uses
+    # to find them. Only bother asking if a Cast-looking device actually
+    # showed up: it's one extra mdns_timeout-long wait regardless of how
+    # many devices are on the subnet, so it's not worth paying when
+    # nothing here looks like a Cast device anyway.
+    cast_names: Dict[str, str] = {}
+    if any(port == _CAST_CONTROL_PORT for port in matched_ports.values()):
+        cast_names = mdns_service_lookup(_CAST_SERVICE_TYPE, timeout=mdns_timeout)
+
     devices: List[Device] = []
+    # IPs Cast service discovery already named don't need the slower,
+    # per-host reverse-DNS/mDNS fallback below.
+    remaining_ips = [ip_str for ip_str in matched_ports if ip_str not in cast_names]
+
     # Resolving hostnames one at a time would add up fast once mDNS is
     # involved: a device that doesn't support it costs a full
     # mdns_timeout wait, and on a subnet with several such devices that's
@@ -447,11 +616,15 @@ def tcp_scan(
     # instead, same as the port-probing step above.
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_resolve_hostname, ip_str, mdns_timeout): ip_str for ip_str in matched_ports
+            executor.submit(_resolve_hostname, ip_str, mdns_timeout): ip_str for ip_str in remaining_ips
         }
         for future in as_completed(futures):
             ip_str = futures[future]
             hostname = future.result()
+            devices.append({"ip": ip_str, "hostname": hostname, "port": matched_ports[ip_str]})
+
+    for ip_str, hostname in cast_names.items():
+        if ip_str in matched_ports:
             devices.append({"ip": ip_str, "hostname": hostname, "port": matched_ports[ip_str]})
 
     # Sort numerically by IP (not lexicographically as strings, which would

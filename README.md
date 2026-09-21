@@ -64,22 +64,36 @@ smart-home device) — see `PORT_SERVICES` in the script for the full list.
 A device with no hostname and an unfamiliar port is worth cross-checking
 against your router's admin page (usually `192.168.1.1` in a browser).
 
-Hostnames come from reverse DNS first, then fall back to mDNS/Bonjour for
-devices that never register a PTR record — which is most Chromecasts,
-smart speakers, printers, and other consumer/IoT gear. This is built in
-with no extra dependency (`--timeout`/`--mdns-timeout` control how long
-each lookup waits); on iOS, the first mDNS query may trigger an OS prompt
-asking to allow "Local Network" access — accept it or this fallback will
-just silently find nothing.
+Hostnames are resolved in this order, all built in with no extra
+dependency:
+1. **DNS-SD Cast service discovery** — for anything answering on the
+   Chromecast control port (8009). Chromecasts generally *don't* answer
+   reverse mDNS lookups (step 3 below) since that part of the spec is
+   optional and Google's Cast stack skips it — but they always answer
+   "who offers `_googlecast._tcp.local`?", since that's the actual
+   mechanism the Google Home app and Chrome's "Cast" button use to find
+   them. This gets you the real device name (e.g. "Living Room TV").
+2. **Reverse DNS** (`socket.gethostbyaddr`) — works for whatever your
+   router/DHCP server names in its own DNS, typically just itself and
+   maybe a few statically-configured hosts.
+3. **mDNS/Bonjour reverse lookup** — for other devices (printers, NAS
+   boxes, smart speakers, etc.) that implement the optional reverse-PTR
+   part of mDNS but never register real reverse DNS.
+
+`--timeout`/`--mdns-timeout` control how long each of steps 2–3 wait per
+device; step 1 runs once per scan (not per device) and also respects
+`--mdns-timeout`. On iOS, the first mDNS query may trigger an OS prompt
+asking to allow "Local Network" access — accept it or these fallbacks
+will just silently find nothing.
 
 ```
 python mobile_network_scanner.py --mdns-timeout 0.5
 ```
 
-Note: this is a *best-effort* fallback, not a full mDNS implementation —
-it sends one PTR query and reads whatever comes back within the timeout,
-which is enough for most devices but won't work through mDNS reflectors/
-VLANs that don't forward multicast traffic.
+Note: this is a *best-effort* implementation, not a full mDNS/DNS-SD
+stack — it sends one query per method and reads whatever comes back
+within the timeout, which is enough for most devices but won't work
+through mDNS reflectors/VLANs that don't forward multicast traffic.
 
 **Running on iPhone:** install [a-Shell](https://apps.apple.com/us/app/a-shell/id1473805438)
 from the App Store (not "a-Shell mini," which strips out `git`), then either
