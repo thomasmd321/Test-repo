@@ -64,6 +64,23 @@ smart-home device) — see `PORT_SERVICES` in the script for the full list.
 A device with no hostname and an unfamiliar port is worth cross-checking
 against your router's admin page (usually `192.168.1.1` in a browser).
 
+Hostnames come from reverse DNS first, then fall back to mDNS/Bonjour for
+devices that never register a PTR record — which is most Chromecasts,
+smart speakers, printers, and other consumer/IoT gear. This is built in
+with no extra dependency (`--timeout`/`--mdns-timeout` control how long
+each lookup waits); on iOS, the first mDNS query may trigger an OS prompt
+asking to allow "Local Network" access — accept it or this fallback will
+just silently find nothing.
+
+```
+python mobile_network_scanner.py --mdns-timeout 0.5
+```
+
+Note: this is a *best-effort* fallback, not a full mDNS implementation —
+it sends one PTR query and reads whatever comes back within the timeout,
+which is enough for most devices but won't work through mDNS reflectors/
+VLANs that don't forward multicast traffic.
+
 **Running on iPhone:** install [a-Shell](https://apps.apple.com/us/app/a-shell/id1473805438)
 from the App Store (not "a-Shell mini," which strips out `git`), then either
 `git clone` this repo or grab just the one file you need with `curl`:
