@@ -191,6 +191,12 @@ def ping(ip: str, timeout: float) -> bool:
     Returns:
         True if the ping succeeded (host is reachable), False otherwise
         (host is down, unreachable, or blocking ICMP).
+
+    Raises:
+        RuntimeError: the `ping` binary itself isn't installed/on PATH.
+            Unlike a per-host timeout, this means the whole ping-sweep
+            fallback can't run at all, so it's surfaced clearly rather
+            than silently treated as "every host is unreachable".
     """
     is_windows = platform.system().lower() == "windows"
 
@@ -206,9 +212,21 @@ def ping(ip: str, timeout: float) -> bool:
 
     command = ["ping", count_flag, "1", *timeout_flag, ip]
 
-    # Discard ping's stdout/stderr - we only care about its exit code
-    # (0 = got a reply, non-zero = timed out or errored).
-    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        # Discard ping's stdout/stderr - we only care about its exit code
+        # (0 = got a reply, non-zero = timed out or errored).
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError as exc:
+        # Some minimal environments (slim containers, certain CI images)
+        # don't ship a `ping` binary at all. That's a missing-dependency
+        # problem, not "this one host didn't answer", so raise a clear
+        # error instead of letting every host silently look unreachable.
+        raise RuntimeError(
+            "`ping` command not found. The ping-sweep fallback (used when "
+            "scapy or root/administrator privileges for an ARP scan aren't "
+            "available) requires the OS's `ping` binary to be installed "
+            "and on PATH."
+        ) from exc
     return result.returncode == 0
 
 
@@ -363,7 +381,15 @@ def main() -> None:
 
     print(f"Scanning {', '.join(subnets)} ...")
 
-    devices: List[Device] = scan_all_subnets(subnets, args.timeout)
+    try:
+        devices: List[Device] = scan_all_subnets(subnets, args.timeout)
+    except RuntimeError as exc:
+        # A missing required dependency (e.g. no `ping` binary at all) -
+        # print the specific reason instead of a raw traceback, since
+        # there's nothing the user can do to retry, only to fix their
+        # environment.
+        print(f"Error: {exc}")
+        raise SystemExit(1)
 
     if not devices:
         print("No devices found.")

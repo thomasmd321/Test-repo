@@ -123,6 +123,11 @@ class TestPing:
         with patch("network_scanner.subprocess.run", return_value=MagicMock(returncode=1)):
             assert ns.ping("192.168.1.1", timeout=1.0) is False
 
+    def test_raises_clear_error_when_ping_binary_missing(self):
+        with patch("network_scanner.subprocess.run", side_effect=FileNotFoundError):
+            with pytest.raises(RuntimeError, match="ping"):
+                ns.ping("192.168.1.1", timeout=1.0)
+
 
 class TestReadArpTable:
     def test_parses_ip_and_mac_pairs(self):
@@ -191,6 +196,11 @@ class TestPingSweep:
         with patch("network_scanner.ping", return_value=False), \
                 patch("network_scanner.read_arp_table", return_value={}):
             assert ns.ping_sweep("192.168.1.0/30", timeout=0.1, max_workers=4) == []
+
+    def test_propagates_missing_ping_binary_error(self):
+        with patch("network_scanner.ping", side_effect=RuntimeError("`ping` command not found.")):
+            with pytest.raises(RuntimeError, match="ping"):
+                ns.ping_sweep("192.168.1.0/30", timeout=0.1, max_workers=4)
 
 
 class TestScan:
