@@ -99,10 +99,27 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       (harmless for normal use, but meant tests/overrides of that
       constant were quietly ignored).
 
-- [ ] **Custom device labels/aliases.** A way to assign a friendly name
+- [x] **Custom device labels/aliases.** A way to assign a friendly name
       to a MAC/IP (e.g. "Kitchen Echo") stored in the known-devices
       registry, shown instead of/alongside the hostname - useful for
       devices whose real hostname is cryptic or blank.
+      Done: `_set_label()`/`_remove_label()`/`_load_labels()` in both
+      scripts, plus `--set-label KEY=LABEL` and `--remove-label KEY`
+      (both repeatable), stored as a `"label"` field in the same
+      known-devices registry entry as first_seen/last_seen. Display via
+      `_display_hostname()`: "label (hostname)" when both are set and
+      differ, otherwise whichever one is available - used in both the
+      main results table and the missing-devices report. A label can be
+      set for a device that isn't in the registry yet (creates a
+      minimal entry), with one deliberate side effect documented in the
+      docstring: that device won't show as NEW the next time it's
+      actually scanned, since being labeled already counts as "known."
+      Verified end-to-end against a real loopback listener on both
+      scripts: baseline scan (bare hostname) → `--set-label` (combined
+      display, confirmed in the saved registry file too) →
+      `--remove-label` (reverts to bare hostname) → a separate scan
+      with the labeled device absent, confirming the missing-devices
+      report shows the label instead of nothing.
 
 - [ ] **MQTT/Home Assistant presence publishing.** Let `--watch` publish
       device presence via MQTT discovery, so it can act as a real
@@ -244,9 +261,9 @@ plain sockets and are fully portable:
       paired start/reset code per line and no color bleeding between
       rows.
 
-- [ ] **Custom device labels/aliases** (see the shared idea above) - not
-      platform-specific at all, just local file I/O.
-      (Export to CSV/JSON, formerly listed here too, is done - see above.)
+Custom device labels/aliases and export to CSV/JSON, both formerly
+listed here as mobile-relevant open items, are done for both scripts -
+see above.
 
 Weaker fit, not started: a `--identify IP` deep-dive mode would work for
 banner grabbing and a wider port list, but would be missing the MAC/

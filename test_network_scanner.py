@@ -1360,3 +1360,97 @@ class TestFindMissingDevices:
         missing = ns._find_missing_devices([], known_devices_path=path)
 
         assert [entry["key"] for entry in missing] == ["aa:aa:aa:aa:aa:aa", "cc:cc:cc:cc:cc:cc"]
+
+
+class TestSetLabel:
+    def test_sets_label_on_an_existing_device(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}
+        ns._mark_new_devices([device], known_devices_path=path)
+
+        ns._set_label("aa:bb:cc:dd:ee:ff", "Kitchen Echo", known_devices_path=path)
+
+        stored = ns._load_known_devices(path)["aa:bb:cc:dd:ee:ff"]
+        assert stored["label"] == "Kitchen Echo"
+
+    def test_creates_a_minimal_entry_for_an_unseen_device(self, tmp_path):
+        path = tmp_path / "known.json"
+
+        ns._set_label("192.168.1.99", "Guest Phone", known_devices_path=path)
+
+        stored = ns._load_known_devices(path)["192.168.1.99"]
+        assert stored["label"] == "Guest Phone"
+
+    def test_does_not_disturb_other_registry_fields(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "router.local", "vendor": "Acme"}
+        ns._mark_new_devices([device], known_devices_path=path)
+
+        ns._set_label("aa:bb:cc:dd:ee:ff", "Router", known_devices_path=path)
+
+        stored = ns._load_known_devices(path)["aa:bb:cc:dd:ee:ff"]
+        assert stored["hostname"] == "router.local"
+        assert stored["vendor"] == "Acme"
+        assert "first_seen" in stored
+
+
+class TestRemoveLabel:
+    def test_removes_an_existing_label(self, tmp_path):
+        path = tmp_path / "known.json"
+        ns._set_label("aa:bb:cc:dd:ee:ff", "Kitchen Echo", known_devices_path=path)
+
+        ns._remove_label("aa:bb:cc:dd:ee:ff", known_devices_path=path)
+
+        assert "label" not in ns._load_known_devices(path)["aa:bb:cc:dd:ee:ff"]
+
+    def test_does_not_raise_for_an_unknown_device(self, tmp_path):
+        path = tmp_path / "known.json"
+        ns._remove_label("192.168.1.99", known_devices_path=path)  # Should not raise.
+
+    def test_does_not_raise_for_a_device_with_no_label(self, tmp_path):
+        path = tmp_path / "known.json"
+        ns._mark_new_devices(
+            [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}], known_devices_path=path
+        )
+        ns._remove_label("aa:bb:cc:dd:ee:ff", known_devices_path=path)  # Should not raise.
+
+
+class TestLoadLabels:
+    def test_returns_only_devices_with_a_label_set(self, tmp_path):
+        path = tmp_path / "known.json"
+        ns._mark_new_devices(
+            [
+                {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""},
+                {"ip": "192.168.1.2", "mac": "11:22:33:44:55:66", "hostname": "", "vendor": ""},
+            ],
+            known_devices_path=path,
+        )
+        ns._set_label("aa:bb:cc:dd:ee:ff", "Kitchen Echo", known_devices_path=path)
+
+        assert ns._load_labels(known_devices_path=path) == {"aa:bb:cc:dd:ee:ff": "Kitchen Echo"}
+
+    def test_returns_empty_dict_when_no_labels_are_set(self, tmp_path):
+        path = tmp_path / "known.json"
+        ns._mark_new_devices(
+            [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}], known_devices_path=path
+        )
+
+        assert ns._load_labels(known_devices_path=path) == {}
+
+
+class TestDisplayHostname:
+    def test_returns_bare_hostname_when_no_label_is_set(self):
+        assert ns._display_hostname("router.local", "") == "router.local"
+
+    def test_returns_label_when_no_hostname_is_set(self):
+        assert ns._display_hostname("", "Kitchen Echo") == "Kitchen Echo"
+
+    def test_combines_both_when_they_differ(self):
+        assert ns._display_hostname("Chromecast-abc123.local", "Living Room TV") == \
+            "Living Room TV (Chromecast-abc123.local)"
+
+    def test_returns_just_the_label_when_they_are_identical(self):
+        assert ns._display_hostname("router.local", "router.local") == "router.local"
+
+    def test_returns_empty_string_when_neither_is_set(self):
+        assert ns._display_hostname("", "") == ""

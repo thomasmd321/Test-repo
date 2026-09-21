@@ -327,6 +327,34 @@ The very first run (or right after `--forget-known-devices`) will mark
 every device `NEW`, since nothing has been seen before yet — that's
 expected, not a bug.
 
+## Custom device labels/aliases
+
+Assign a friendly name to a device — useful when its real hostname is
+cryptic or blank — with `--set-label KEY=LABEL`, where `KEY` is its MAC
+address for `network_scanner.py` (or IP if it has none — see
+`_device_identity()`), or always its IP for `mobile_network_scanner.py`.
+The label is stored in the same known-devices registry as everything
+else above, and shown in the results table in place of/alongside the
+real hostname (`Kitchen Server (localhost)` when they differ, just
+`Kitchen Server` when there's no hostname to show alongside it).
+
+```
+python network_scanner.py --set-label aa:bb:cc:dd:ee:ff="Kitchen Server"
+python mobile_network_scanner.py --set-label 192.168.1.42="Kitchen Echo"
+python network_scanner.py --remove-label aa:bb:cc:dd:ee:ff
+```
+
+Both flags are repeatable (pass `--set-label` more than once to label
+several devices in one command) and take effect immediately, including on
+the scan that runs in the same command — so a label can be set and see it
+applied without waiting for the device to show up in a second run. A
+device doesn't need to already be in the registry: labeling one by IP/MAC
+you've seen in a previous run's output creates a minimal registry entry
+for it, though that also means it won't show as `NEW` the next time it's
+actually scanned (labeling it counts as "already known"). A label also
+appears in place of the hostname in the "previously-seen device(s) not
+found" report if that device goes missing later.
+
 ## Exporting results
 
 Both scripts can save a scan's results to a file with `--output FILE`,

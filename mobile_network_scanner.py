@@ -1088,6 +1088,77 @@ def _find_missing_devices(devices: List[Device], known_devices_path: Path = _KNO
     return sorted(missing, key=lambda entry: entry["key"])
 
 
+# --- Custom device labels/aliases ---
+#
+# A friendly name (e.g. "Kitchen Echo") for a device whose real hostname is
+# cryptic or blank, stored in the same known-devices registry as
+# first_seen/last_seen - not a separate file, so there's only one place
+# tracking what this script knows about a given device.
+
+def _set_label(key: str, label: str, known_devices_path: Path = _KNOWN_DEVICES_PATH) -> None:
+    """Assign a custom label to a device, in the known-devices registry.
+
+    Args:
+        key: The device's _device_identity() - its IP address (this
+            script has no MAC to key on - see _device_identity()).
+        label: The friendly name to show instead of/alongside its
+            hostname (see _display_hostname()).
+        known_devices_path: Where the registry is stored between runs
+            (overridable for tests; production code should just use the
+            default).
+
+    A device doesn't need to already be in the registry - this creates a
+    minimal entry if needed, so a label can be set for a device right
+    after seeing its IP in a previous scan's output, without waiting for
+    it to show up again. One side effect: that minimal entry means the
+    device won't be flagged NEW next time it's actually scanned, since
+    _mark_new_devices() only checks whether the key is already present,
+    not whether it came from a real scan or a label.
+    """
+    known = _load_known_devices(known_devices_path)
+    entry = known.setdefault(key, {})
+    entry["label"] = label
+    _save_known_devices(known, known_devices_path)
+
+
+def _remove_label(key: str, known_devices_path: Path = _KNOWN_DEVICES_PATH) -> None:
+    """Remove a device's custom label, if any, leaving the rest of its registry entry intact."""
+    known = _load_known_devices(known_devices_path)
+    if "label" in known.get(key, {}):
+        del known[key]["label"]
+        _save_known_devices(known, known_devices_path)
+
+
+def _load_labels(known_devices_path: Path = _KNOWN_DEVICES_PATH) -> Dict[str, str]:
+    """Load every device's custom label (see _set_label()) from the registry.
+
+    Returns:
+        A dict mapping each labeled device's _device_identity() to its
+        label. Devices without one set are omitted entirely (not mapped
+        to "").
+    """
+    known = _load_known_devices(known_devices_path)
+    return {key: entry["label"] for key, entry in known.items() if entry.get("label")}
+
+
+def _display_hostname(hostname: str, label: str) -> str:
+    """Combine a device's real hostname with its custom label, if any.
+
+    Args:
+        hostname: The device's actual hostname from this scan, or "" if
+            none was found.
+        label: Its custom label from _load_labels(), or "" if none is set.
+
+    Returns:
+        "label (hostname)" if both are set and differ (so neither is
+        lost), just the label if hostname is blank or identical to it,
+        or the bare hostname if there's no label at all.
+    """
+    if label and hostname and label != hostname:
+        return f"{label} ({hostname})"
+    return label or hostname
+
+
 # --- Colorized terminal output ---
 #
 # Plain ANSI escape codes, not a library like colorama - a-Shell's
@@ -1210,6 +1281,20 @@ def main() -> None:
         help="Clear the known-devices registry before scanning, so every device found in this run is marked NEW",
     )
     parser.add_argument(
+        "--set-label",
+        action="append",
+        default=[],
+        metavar="KEY=LABEL",
+        help="Assign a friendly label to a device (KEY is its IP address) shown instead of/alongside its hostname. Repeatable.",
+    )
+    parser.add_argument(
+        "--remove-label",
+        action="append",
+        default=[],
+        metavar="KEY",
+        help="Remove a device's custom label (see --set-label). Repeatable.",
+    )
+    parser.add_argument(
         "--no-banners",
         action="store_true",
         help="Skip banner grabbing on each device's open port - faster, but loses a good identification hint for devices with no hostname",
@@ -1249,6 +1334,14 @@ def main() -> None:
     if args.forget_known_devices:
         _save_known_devices({}, _KNOWN_DEVICES_PATH)
 
+    for spec in args.set_label:
+        key, sep, label = spec.partition("=")
+        if not sep:
+            parser.error(f"--set-label expects KEY=LABEL, got {spec!r}")
+        _set_label(key, label, known_devices_path=_KNOWN_DEVICES_PATH)
+    for key in args.remove_label:
+        _remove_label(key, known_devices_path=_KNOWN_DEVICES_PATH)
+
     def run_once() -> None:
         """Scan once, mark/print NEW devices, and print the results table."""
         print(f"Scanning {', '.join(subnets)} on ports {ports} ...")
@@ -1287,6 +1380,7 @@ def main() -> None:
             if args.no_track_devices
             else _find_missing_devices(devices, known_devices_path=_KNOWN_DEVICES_PATH)
         )
+        labels = {} if args.no_track_devices else _load_labels(_KNOWN_DEVICES_PATH)
 
         # A leading marker column (rather than reflowing every other
         # column's width) keeps a NEW device visually obvious without
@@ -1313,9 +1407,10 @@ def main() -> None:
             else:
                 marker = "     "
             banner = device.get("banner") or ""
+            hostname_display = _display_hostname(device.get("hostname", ""), labels.get(key, ""))
             row = (
                 f"{marker}{device['ip']:<18}{port:<8}{service:<24}"
-                f"{device.get('hostname', ''):<24}{banner}"
+                f"{hostname_display:<24}{banner}"
             )
             # A single color per row, not nested calls: _colorize() wraps
             # text in a start code and a reset, and ANSI's reset clears
@@ -1343,7 +1438,9 @@ def main() -> None:
         if missing:
             print(f"\n{len(missing)} previously-seen device(s) not found in this scan:")
             for entry in missing:
-                label = entry.get("hostname") or ""
+                # A custom label (see --set-label) wins over the plain
+                # hostname, same priority as the results table.
+                label = entry.get("label") or entry.get("hostname") or ""
                 suffix = f"  ({label})" if label else ""
                 line = f"  {entry['key']:<18} last seen {entry.get('last_seen', '?')}{suffix}"
                 print(_colorize(line, "dim", color))

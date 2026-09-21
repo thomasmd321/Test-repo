@@ -38,6 +38,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import (
     HRFlowable,
     Image,
+    KeepTogether,
     PageBreak,
     Paragraph,
     SimpleDocTemplate,
@@ -383,6 +384,7 @@ def build_pdf(desktop_diagram: Path, mobile_diagram: Path, terminal_mockup: Path
         crow("Risky-port flagging", "Yes", "Yes"),
         crow("NEW / CHG / missing tracking", "Yes", "Yes"),
         crow("Export results", "--output FILE (CSV/JSON)", "--output FILE (CSV/JSON)"),
+        crow("Custom device labels", "--set-label / --remove-label", "--set-label / --remove-label"),
     ]
     ct = Table(compare_data, colWidths=[1.5 * inch, 2.5 * inch, 2.5 * inch])
     ct_style = [
@@ -464,6 +466,8 @@ python3 network_scanner.py --output scan.json  # save results to a file"""))
         ("--watch SECONDS", "Rescan on a timer instead of once, printing NEW markers as they appear (Ctrl+C to stop)."),
         ("--no-track-devices", "Don't use the known-devices registry at all — no NEW/CHG markers, nothing remembered."),
         ("--forget-known-devices", "Clear the registry first, so everything in this run shows as NEW."),
+        ("--set-label KEY=LABEL", "Assign a friendly label to a device (KEY is its MAC, or IP if it has none), shown instead of/alongside its hostname. Repeatable."),
+        ("--remove-label KEY", "Remove a device's custom label. Repeatable."),
         ("--ipv6", "Also discover IPv6 devices via multicast ping + NDP (Linux/macOS only)."),
         ("--ipv6-timeout SECONDS", "Roughly how long to spend on IPv6 discovery (default: 2.0)."),
         ("--no-scan-ports", "Skip the open-port probe (and the risky-ports check that depends on it)."),
@@ -505,6 +509,8 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
         ("--watch SECONDS", "Rescan on a timer instead of once, printing NEW markers as they appear (Ctrl+C to stop)."),
         ("--no-track-devices", "Don't use the known-devices registry at all — no NEW/CHG markers, nothing remembered."),
         ("--forget-known-devices", "Clear the registry first, so everything in this run shows as NEW."),
+        ("--set-label KEY=LABEL", "Assign a friendly label to a device (KEY is its IP address), shown instead of/alongside its hostname. Repeatable."),
+        ("--remove-label KEY", "Remove a device's custom label. Repeatable."),
         ("--no-banners", "Skip banner grabbing on each device's open port — faster, but a weaker identification hint."),
         ("--no-risky-ports", "Skip the risky-ports security check while keeping the general port probe."),
         ("--no-color", "Disable ANSI color output (also respects the <font face=\"Courier\">NO_COLOR</font> env var)."),
@@ -575,6 +581,24 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
     story.append(code_block("""python3 network_scanner.py --no-track-devices      # skip tracking this run
 python3 network_scanner.py --forget-known-devices  # reset registry, all NEW
 python3 mobile_network_scanner.py --watch 300      # standing monitor on phone"""))
+
+    story.append(KeepTogether([
+        Paragraph("Custom device labels", styles["H2"]),
+        Paragraph(
+            "The same registry can hold a friendly label for a device — useful when its real "
+            "hostname is cryptic or blank — shown in place of/alongside the hostname (e.g. "
+            "<font face='Courier'>Kitchen Server (localhost)</font> when they differ). KEY is a "
+            "device's MAC (or IP if it has none) for network_scanner.py, or always its IP for "
+            "mobile_network_scanner.py.", styles["Body"]),
+        code_block("""python3 network_scanner.py --set-label aa:bb:cc:dd:ee:ff="Kitchen Server"
+python3 mobile_network_scanner.py --set-label 192.168.1.42="Kitchen Echo"
+python3 network_scanner.py --remove-label aa:bb:cc:dd:ee:ff"""),
+        Paragraph(
+            "Both flags are repeatable and take effect immediately, including on the scan that "
+            "runs in the same command. A device doesn't need to already be in the registry — "
+            "labeling one creates a minimal entry for it, though that also means it won't show as "
+            "NEW the next time it's actually scanned.", styles["BodySmall"]),
+    ]))
 
     story.append(PageBreak())
 

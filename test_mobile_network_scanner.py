@@ -862,3 +862,92 @@ class TestFindMissingDevices:
         missing = ms._find_missing_devices([], known_devices_path=path)
 
         assert [entry["key"] for entry in missing] == ["192.168.1.2", "192.168.1.9"]
+
+
+class TestSetLabel:
+    def test_sets_label_on_an_existing_device(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.1", "hostname": "", "port": 80}
+        ms._mark_new_devices([device], known_devices_path=path)
+
+        ms._set_label("192.168.1.1", "Kitchen Echo", known_devices_path=path)
+
+        stored = ms._load_known_devices(path)["192.168.1.1"]
+        assert stored["label"] == "Kitchen Echo"
+
+    def test_creates_a_minimal_entry_for_an_unseen_device(self, tmp_path):
+        path = tmp_path / "known.json"
+
+        ms._set_label("192.168.1.99", "Guest Phone", known_devices_path=path)
+
+        stored = ms._load_known_devices(path)["192.168.1.99"]
+        assert stored["label"] == "Guest Phone"
+
+    def test_does_not_disturb_other_registry_fields(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.1", "hostname": "router.local", "port": 80}
+        ms._mark_new_devices([device], known_devices_path=path)
+
+        ms._set_label("192.168.1.1", "Router", known_devices_path=path)
+
+        stored = ms._load_known_devices(path)["192.168.1.1"]
+        assert stored["hostname"] == "router.local"
+        assert "first_seen" in stored
+
+
+class TestRemoveLabel:
+    def test_removes_an_existing_label(self, tmp_path):
+        path = tmp_path / "known.json"
+        ms._set_label("192.168.1.1", "Kitchen Echo", known_devices_path=path)
+
+        ms._remove_label("192.168.1.1", known_devices_path=path)
+
+        assert "label" not in ms._load_known_devices(path)["192.168.1.1"]
+
+    def test_does_not_raise_for_an_unknown_device(self, tmp_path):
+        path = tmp_path / "known.json"
+        ms._remove_label("192.168.1.99", known_devices_path=path)  # Should not raise.
+
+    def test_does_not_raise_for_a_device_with_no_label(self, tmp_path):
+        path = tmp_path / "known.json"
+        ms._mark_new_devices([{"ip": "192.168.1.1", "hostname": "", "port": 80}], known_devices_path=path)
+        ms._remove_label("192.168.1.1", known_devices_path=path)  # Should not raise.
+
+
+class TestLoadLabels:
+    def test_returns_only_devices_with_a_label_set(self, tmp_path):
+        path = tmp_path / "known.json"
+        ms._mark_new_devices(
+            [
+                {"ip": "192.168.1.1", "hostname": "", "port": 80},
+                {"ip": "192.168.1.2", "hostname": "", "port": 80},
+            ],
+            known_devices_path=path,
+        )
+        ms._set_label("192.168.1.1", "Kitchen Echo", known_devices_path=path)
+
+        assert ms._load_labels(known_devices_path=path) == {"192.168.1.1": "Kitchen Echo"}
+
+    def test_returns_empty_dict_when_no_labels_are_set(self, tmp_path):
+        path = tmp_path / "known.json"
+        ms._mark_new_devices([{"ip": "192.168.1.1", "hostname": "", "port": 80}], known_devices_path=path)
+
+        assert ms._load_labels(known_devices_path=path) == {}
+
+
+class TestDisplayHostname:
+    def test_returns_bare_hostname_when_no_label_is_set(self):
+        assert ms._display_hostname("router.local", "") == "router.local"
+
+    def test_returns_label_when_no_hostname_is_set(self):
+        assert ms._display_hostname("", "Kitchen Echo") == "Kitchen Echo"
+
+    def test_combines_both_when_they_differ(self):
+        assert ms._display_hostname("Chromecast-abc123.local", "Living Room TV") == \
+            "Living Room TV (Chromecast-abc123.local)"
+
+    def test_returns_just_the_label_when_they_are_identical(self):
+        assert ms._display_hostname("router.local", "router.local") == "router.local"
+
+    def test_returns_empty_string_when_neither_is_set(self):
+        assert ms._display_hostname("", "") == ""
