@@ -18,13 +18,29 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       independent of the known-devices registry already used for NEW
       markers.
 
-- [ ] **Port-change detection on known devices.** The known-devices
+- [x] **Port-change detection on known devices.** The known-devices
       registry already stores each device's last-matched port/hostname -
       diffing this scan's port against what's stored would flag "this
       device didn't have port 23 open last week," a sharper security
       signal than the static RISKY_PORTS check alone. Nearly free since
       all the data needed is already being collected; just needs a
       small registry-schema/diff addition.
+      Done: `_find_port_changes()` in both scripts, comparing each
+      device's current port against what `_mark_new_devices()` last
+      persisted - must run *before* that call, since it overwrites the
+      registry with the new value. A `CHG` row marker (yellow;
+      mutually exclusive with `NEW` by construction - a device with no
+      prior registry entry can't have a "changed" port) plus a summary
+      section listing old→new for each changed device.
+      `network_scanner.py` wasn't even persisting `port` in the registry
+      before this (only `mobile_network_scanner.py` was) - added that
+      too. Verified end-to-end on both scripts: ran a real scan against
+      a loopback listener on one port, killed it, started a second
+      listener on a different port, rescanned, and confirmed the real
+      `_find_port_changes()`/`_mark_new_devices()` pair (and the full
+      `main()` print path, under a real pty for color) correctly
+      reported the old→new port and left the device correctly
+      unflagged as NEW.
 
 - [ ] **Scan history log.** Beyond the known-devices registry's
       first_seen/last_seen pair, append each scan's snapshot to a

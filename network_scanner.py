@@ -995,9 +995,51 @@ def _mark_new_devices(devices: List[Device], known_devices_path: Path = _KNOWN_D
         entry["ip"] = device["ip"]
         entry["hostname"] = device.get("hostname", "")
         entry["vendor"] = device.get("vendor", "")
+        entry["port"] = device.get("port")
 
     _save_known_devices(known, known_devices_path)
     return is_new
+
+
+def _find_port_changes(
+    devices: List[Device], known_devices_path: Path = _KNOWN_DEVICES_PATH
+) -> Dict[str, Tuple[Optional[int], Optional[int]]]:
+    """Compare each device's current port against what the registry last recorded.
+
+    Must be called *before* _mark_new_devices() overwrites the registry
+    with this scan's port - otherwise the "previous" value is already
+    gone by the time this reads it. A changed port is a signal worth
+    surfacing on its own, distinct from RISKY_PORTS: a device that starts
+    (or stops) answering on some port is worth a second look even when
+    that port isn't on the risky list, and this needs no new probing at
+    all - just diffing data _mark_new_devices() already persists.
+
+    Args:
+        devices: This scan's results.
+        known_devices_path: Where the registry is stored between runs
+            (overridable for tests; production code should just use the
+            default).
+
+    Returns:
+        A dict mapping each changed device's _device_identity() to
+        (previous_port, current_port). Only devices already in the
+        registry are considered - a device seeing its first-ever port
+        isn't a "change", it's just NEW (see _mark_new_devices()).
+    """
+    known = _load_known_devices(known_devices_path)
+
+    changes: Dict[str, Tuple[Optional[int], Optional[int]]] = {}
+    for device in devices:
+        key = _device_identity(device)
+        entry = known.get(key)
+        if entry is None:
+            continue
+        previous_port = entry.get("port")
+        current_port = device.get("port")
+        if previous_port != current_port:
+            changes[key] = (previous_port, current_port)
+
+    return changes
 
 
 def _find_missing_devices(devices: List[Device], known_devices_path: Path = _KNOWN_DEVICES_PATH) -> List[dict]:
@@ -1821,6 +1863,15 @@ def main() -> None:
         # future --known-devices-file flag - is actually respected here,
         # instead of these calls silently keeping whatever path was
         # bound to the default argument at function-definition time.
+        #
+        # _find_port_changes() must run before _mark_new_devices(): the
+        # latter overwrites the registry with this scan's port, so the
+        # "previous" value it needs would already be gone otherwise.
+        port_changes = (
+            {}
+            if args.no_track_devices
+            else _find_port_changes(devices, known_devices_path=_KNOWN_DEVICES_PATH)
+        )
         is_new = {} if args.no_track_devices else _mark_new_devices(devices, known_devices_path=_KNOWN_DEVICES_PATH)
         missing = (
             []
@@ -1847,10 +1898,19 @@ def main() -> None:
             port_display = str(port) if port is not None else "-"
             service_display = PORT_SERVICES.get(port, "?") if port is not None else "-"
 
-            is_device_new = bool(is_new.get(_device_identity(device)))
+            key = _device_identity(device)
+            is_device_new = bool(is_new.get(key))
             if is_device_new:
                 new_count += 1
-            marker = "NEW  " if is_device_new else "     "
+            # A device can't be both: port_changes only contains devices
+            # already in the registry, while NEW means the opposite.
+            has_port_change = key in port_changes
+            if is_device_new:
+                marker = "NEW  "
+            elif has_port_change:
+                marker = "CHG  "
+            else:
+                marker = "     "
 
             row = (
                 f"{marker}{device['ip']:<42}{mac_display:<20}{vendor_display:<24}"
@@ -1861,13 +1921,16 @@ def main() -> None:
             # clears *all* active styling, not just the innermost one -
             # nesting an inner colorize() inside an outer one would have
             # the inner reset kill the outer color partway through the
-            # line. Risky takes priority since it's the more important
-            # signal; a NEW+risky device is still visibly NEW from the
-            # literal marker text, just not also green.
+            # line. Priority (most to least important signal): risky,
+            # then new, then a changed port - a NEW+risky device is still
+            # visibly NEW from the literal marker text, just not also
+            # green.
             if device.get("risky_ports"):
                 row = _colorize(row, "red", color)
             elif is_device_new:
                 row = _colorize(row, "green", color)
+            elif has_port_change:
+                row = _colorize(row, "yellow", color)
             print(row)
 
         print(f"\n{len(devices)} device(s) found.", end="")
@@ -1885,6 +1948,19 @@ def main() -> None:
                 suffix = f"  ({label})" if label else ""
                 line = f"  {entry['key']:<20} last seen {entry.get('last_seen', '?')}{suffix}"
                 print(_colorize(line, "dim", color))
+
+        if port_changes:
+            def _port_label(port: Optional[int]) -> str:
+                return "(none)" if port is None else f"{PORT_SERVICES.get(port, '?')} ({port})"
+
+            print(_colorize(f"\n{len(port_changes)} device(s) with a changed port since last seen:", "yellow", color))
+            for device in devices:
+                key = _device_identity(device)
+                if key not in port_changes:
+                    continue
+                previous_port, current_port = port_changes[key]
+                line = f"  {device['ip']:<20} {_port_label(previous_port)} -> {_port_label(current_port)}"
+                print(_colorize(line, "yellow", color))
 
         risky_devices = [d for d in devices if d.get("risky_ports")]
         if risky_devices:

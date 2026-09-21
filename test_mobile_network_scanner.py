@@ -740,6 +740,31 @@ class TestMarkNewDevices:
         assert "last_seen" in stored
 
 
+class TestFindPortChanges:
+    def test_reports_devices_whose_port_differs_from_the_registry(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.1", "hostname": "", "port": 80, "banner": "", "risky_ports": []}
+        ms._mark_new_devices([device], known_devices_path=path)
+
+        changed_device = dict(device, port=23)
+        changes = ms._find_port_changes([changed_device], known_devices_path=path)
+
+        assert changes == {"192.168.1.1": (80, 23)}
+
+    def test_ignores_devices_with_an_unchanged_port(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.1", "hostname": "", "port": 80, "banner": "", "risky_ports": []}
+        ms._mark_new_devices([device], known_devices_path=path)
+
+        assert ms._find_port_changes([device], known_devices_path=path) == {}
+
+    def test_a_brand_new_device_is_not_reported_as_a_port_change(self, tmp_path):
+        path = tmp_path / "known.json"
+        new_device = {"ip": "192.168.1.99", "hostname": "", "port": 80, "banner": "", "risky_ports": []}
+
+        assert ms._find_port_changes([new_device], known_devices_path=path) == {}
+
+
 class TestFindMissingDevices:
     def test_empty_registry_reports_nothing_missing(self, tmp_path):
         path = tmp_path / "known.json"

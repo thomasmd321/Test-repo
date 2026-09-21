@@ -289,6 +289,18 @@ device(s) not found in this scan." The registry itself is never pruned —
 a device just stops appearing in that list again once a later scan finds
 it.
 
+The same registry also enables a `CHG` marker: since it already stores
+each device's port from the last scan, comparing that against this
+scan's port catches a device that's started (or stopped) answering on a
+different port than usual — flagged in a summary section below the
+table, e.g. "1 device(s) with a changed port since last seen." This is a
+distinct signal from the risky-ports check above: it doesn't care
+whether the port is on `RISKY_PORTS`, only that it's *different* from
+what this device normally shows, which telnet suddenly appearing on a
+device that's never had it open would trip either way. `NEW` and `CHG`
+are mutually exclusive by definition — a device with no history at all
+can't have a "changed" port, only a first one.
+
 ```
 python network_scanner.py                      # NEW markers on by default
 python network_scanner.py --no-track-devices    # skip tracking entirely
