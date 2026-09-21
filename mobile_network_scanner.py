@@ -51,9 +51,11 @@ Usage:
 import argparse
 import ipaddress
 import json
+import os
 import socket
 import ssl
 import struct
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -75,6 +77,12 @@ class Device(TypedDict):
     # header, an SSH version string, etc. - or "" if nothing useful came
     # back. Often identifies a device outright when hostname is blank.
     banner: str
+    # Filled in by _attach_risky_ports() from _find_risky_ports(): every
+    # open port from RISKY_PORTS, not just the first one found (unlike
+    # "port" above, which stops at the first match from ports/
+    # DEFAULT_PORTS and could otherwise miss a risky port entirely).
+    # Empty if none of RISKY_PORTS are open, the common case.
+    risky_ports: List[int]
 
 
 # Ports likely to be open on common home/office devices, so a scan finds
@@ -589,6 +597,64 @@ def probe_host(ip: str, ports: Iterable[int], timeout: float) -> Optional[int]:
     return None
 
 
+def _probe_tcp_port(ip: str, port: int, timeout: float) -> bool:
+    """Return True if ip accepts a TCP connection on port.
+
+    The same connect_ex-based check probe_host() uses, just for a single
+    port rather than trying a list of them in order - callers here
+    already parallelize across ports themselves, so there's no need for
+    this to also stop early.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex((ip, port)) == 0
+
+
+# A home-network security hygiene check, not an exhaustive audit: ports
+# commonly flagged as risky to leave exposed, with a one-line reason
+# each. Checked independently of DEFAULT_PORTS/probe_host() above, which
+# stops at the first open port it finds - a device with both 80 and 23
+# (telnet) open would otherwise never reveal the telnet port if 80
+# happened to be checked first.
+RISKY_PORTS: Dict[int, str] = {
+    21: "FTP transmits credentials in plaintext",
+    23: "Telnet transmits everything, including credentials, in plaintext",
+    445: "SMB is a common ransomware/worm vector when exposed beyond the LAN",
+    3389: "RDP is frequently targeted by credential-stuffing and brute-force scans",
+    5900: "VNC often runs with weak or no authentication by default",
+}
+
+
+def _find_risky_ports(ip: str, timeout: float) -> List[int]:
+    """Check ip for any of RISKY_PORTS, regardless of what probe_host() found.
+
+    Args:
+        ip: The target host's IPv4 address.
+        timeout: Per-port connection timeout, in seconds.
+
+    Returns:
+        Open ports from RISKY_PORTS, sorted numerically. Empty if none
+        of them are open (the common, unremarkable case).
+    """
+    open_risky = []
+    with ThreadPoolExecutor(max_workers=len(RISKY_PORTS)) as executor:
+        futures = {executor.submit(_probe_tcp_port, ip, port, timeout): port for port in RISKY_PORTS}
+        for future in as_completed(futures):
+            port = futures[future]
+            if future.result():
+                open_risky.append(port)
+    return sorted(open_risky)
+
+
+def _attach_risky_ports(devices: List[Device], timeout: float) -> List[Device]:
+    """Fill in each device's "risky_ports" via _find_risky_ports(), in parallel, in place."""
+    with ThreadPoolExecutor(max_workers=max(1, len(devices))) as executor:
+        futures = {executor.submit(_find_risky_ports, d["ip"], timeout): d for d in devices}
+        for future in as_completed(futures):
+            futures[future]["risky_ports"] = future.result()
+    return devices
+
+
 def _summarize_banner(data: bytes) -> str:
     """Reduce raw banner bytes to one short, printable line.
 
@@ -690,13 +756,15 @@ def tcp_scan(
     max_workers: int = 100,
     mdns_timeout: float = 0.3,
     grab_banners: bool = True,
+    check_risky_ports: bool = True,
 ) -> List[Device]:
     """Discover devices by probing common TCP ports across every host in subnet.
 
     Args:
         subnet: CIDR range to scan, e.g. "192.168.1.0/24".
         timeout: Per-port connection timeout, in seconds. Lower values
-            scan faster but may miss slow-to-respond devices.
+            scan faster but may miss slow-to-respond devices. Also used
+            for the banner-grab and risky-ports steps below.
         ports: TCP ports to probe on each host (see DEFAULT_PORTS).
         max_workers: How many hosts to probe (and later, resolve
             hostnames for) concurrently. A /24 subnet has 254 usable
@@ -712,15 +780,22 @@ def tcp_scan(
             plain-socket primitives this script already uses, and often
             identifies a device that has no hostname at all - but can be
             turned off for a faster scan.
+        check_risky_ports: Whether to also check each device for
+            RISKY_PORTS (see _attach_risky_ports()), independently of
+            whatever `ports` found - a device with both 80 and 23
+            (telnet) open would otherwise never reveal the telnet port
+            if 80 happened to be checked first. On by default; turn off
+            for a faster scan.
 
     Returns:
         Discovered devices sorted by IP address, each with "hostname"
         populated from Cast service discovery (for Chromecast-port
         devices), reverse DNS, or mDNS reverse lookup - whichever found
         one first, or "" if none did - "port" set to whichever probed
-        port answered first, and "banner" set to whatever grab_banner()
-        read from that port, or "" if grab_banners is False or nothing
-        useful came back.
+        port answered first, "banner" set to whatever grab_banner() read
+        from that port, or "" if grab_banners is False or nothing useful
+        came back, and "risky_ports" set to whatever _find_risky_ports()
+        found, or [] if check_risky_ports is False or none are open.
     """
     # strict=False: subnet may be given as a host address (e.g. from
     # get_local_subnet()) rather than a "clean" network address.
@@ -795,6 +870,7 @@ def tcp_scan(
                     "hostname": hostname,
                     "port": matched_ports[ip_str],
                     "banner": banners.get(ip_str, ""),
+                    "risky_ports": [],
                 }
             )
 
@@ -806,8 +882,16 @@ def tcp_scan(
                     "hostname": hostname,
                     "port": matched_ports[ip_str],
                     "banner": banners.get(ip_str, ""),
+                    "risky_ports": [],
                 }
             )
+
+    if check_risky_ports and devices:
+        # Runs over the final device list rather than per-port like the
+        # banner grab above, since RISKY_PORTS is a fixed, small set
+        # checked the same way regardless of which port matched_ports
+        # found for a given host.
+        devices = _attach_risky_ports(devices, timeout)
 
     # Sort numerically by IP (not lexicographically as strings, which would
     # put "10.0.0.2" after "10.0.0.10").
@@ -821,6 +905,7 @@ def scan_all_subnets(
     max_workers: int = 100,
     mdns_timeout: float = 0.3,
     grab_banners: bool = True,
+    check_risky_ports: bool = True,
 ) -> List[Device]:
     """Run tcp_scan() over multiple subnets and merge the results into one list.
 
@@ -831,6 +916,7 @@ def scan_all_subnets(
         max_workers: Passed through to tcp_scan() for each subnet.
         mdns_timeout: Passed through to tcp_scan() for each subnet.
         grab_banners: Passed through to tcp_scan() for each subnet.
+        check_risky_ports: Passed through to tcp_scan() for each subnet.
 
     Returns:
         Every discovered device across all subnets, sorted by IP and
@@ -848,6 +934,7 @@ def scan_all_subnets(
             max_workers=max_workers,
             mdns_timeout=mdns_timeout,
             grab_banners=grab_banners,
+            check_risky_ports=check_risky_ports,
         ):
             devices_by_ip[device["ip"]] = device
 
@@ -958,6 +1045,48 @@ def _find_missing_devices(devices: List[Device], known_devices_path: Path = _KNO
     return sorted(missing, key=lambda entry: entry["key"])
 
 
+# --- Colorized terminal output ---
+#
+# Plain ANSI escape codes, not a library like colorama - a-Shell's
+# terminal (and any other terminal worth colorizing) already understands
+# these natively.
+
+_ANSI_CODES: Dict[str, str] = {
+    "green": "\033[32m",
+    "red": "\033[31m",
+    "yellow": "\033[33m",
+    "dim": "\033[2m",
+    "reset": "\033[0m",
+}
+
+
+def _use_color(no_color_flag: bool) -> bool:
+    """Decide whether to emit ANSI color codes at all.
+
+    Color is skipped if the user passed --no-color, if the NO_COLOR
+    environment variable is set (https://no-color.org - a convention
+    respected by a wide range of CLI tools), or if stdout isn't
+    connected to a terminal at all (piped to a file or another program,
+    where raw escape codes would just be noise mixed into the output).
+
+    Args:
+        no_color_flag: The --no-color CLI flag's value.
+
+    Returns:
+        True if it's safe and wanted to emit color codes.
+    """
+    if no_color_flag or os.environ.get("NO_COLOR"):
+        return False
+    return sys.stdout.isatty()
+
+
+def _colorize(text: str, color: str, enabled: bool) -> str:
+    """Wrap text in an ANSI color code, or return it unchanged if enabled is False."""
+    if not enabled:
+        return text
+    return f"{_ANSI_CODES[color]}{text}{_ANSI_CODES['reset']}"
+
+
 def main() -> None:
     """CLI entry point: parse arguments, run the scan, and print a results table."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -996,7 +1125,19 @@ def main() -> None:
         action="store_true",
         help="Skip banner grabbing on each device's open port - faster, but loses a good identification hint for devices with no hostname",
     )
+    parser.add_argument(
+        "--no-risky-ports",
+        action="store_true",
+        help="Skip the risky-ports security check (see RISKY_PORTS) while keeping the general port probe for identification",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI color in the output (also respects the NO_COLOR env var, and auto-disables when stdout isn't a terminal)",
+    )
     args = parser.parse_args()
+
+    color = _use_color(args.no_color)
 
     # If the user didn't pass a subnet, auto-detect it from the device's
     # own network configuration instead of forcing them to look it up.
@@ -1022,6 +1163,7 @@ def main() -> None:
             ports=ports,
             mdns_timeout=args.mdns_timeout,
             grab_banners=not args.no_banners,
+            check_risky_ports=not args.no_risky_ports,
         )
 
         if not devices:
@@ -1052,16 +1194,30 @@ def main() -> None:
             # Fall back to just the bare port number for anything not in
             # PORT_SERVICES (e.g. a custom --ports value we don't recognize).
             service = PORT_SERVICES.get(port, "?")
-            if is_new.get(_device_identity(device)):
+            is_device_new = bool(is_new.get(_device_identity(device)))
+            if is_device_new:
                 marker = "NEW  "
                 new_count += 1
             else:
                 marker = "     "
             banner = device.get("banner") or ""
-            print(
+            row = (
                 f"{marker}{device['ip']:<18}{port:<8}{service:<24}"
                 f"{device.get('hostname', ''):<24}{banner}"
             )
+            # A single color per row, not nested calls: _colorize() wraps
+            # text in a start code and a reset, and ANSI's reset clears
+            # *all* active styling, not just the innermost one - nesting
+            # an inner colorize() inside an outer one would have the
+            # inner reset kill the outer color partway through the line.
+            # Risky takes priority since it's the more important signal;
+            # a NEW+risky device is still visibly NEW from the literal
+            # marker text, just not also green.
+            if device.get("risky_ports"):
+                row = _colorize(row, "red", color)
+            elif is_device_new:
+                row = _colorize(row, "green", color)
+            print(row)
 
         print(f"\n{len(devices)} device(s) found.", end="")
         if not args.no_track_devices:
@@ -1074,7 +1230,21 @@ def main() -> None:
             for entry in missing:
                 label = entry.get("hostname") or ""
                 suffix = f"  ({label})" if label else ""
-                print(f"  {entry['key']:<18} last seen {entry.get('last_seen', '?')}{suffix}")
+                line = f"  {entry['key']:<18} last seen {entry.get('last_seen', '?')}{suffix}"
+                print(_colorize(line, "dim", color))
+
+        risky_devices = [d for d in devices if d.get("risky_ports")]
+        if risky_devices:
+            print(_colorize(f"\n⚠ {len(risky_devices)} device(s) exposing commonly-risky ports:", "yellow", color))
+            all_risky_ports = set()
+            for d in risky_devices:
+                labels = ", ".join(f"{PORT_SERVICES.get(p, str(p))} ({p})" for p in d["risky_ports"])
+                all_risky_ports.update(d["risky_ports"])
+                line = f"  {d['ip']:<18} {labels}"
+                print(_colorize(line, "red", color))
+            print("\nWhy these are flagged:")
+            for port in sorted(all_risky_ports):
+                print(f"  {port:<6} {RISKY_PORTS[port]}")
 
     if args.watch:
         print(f"Watch mode: rescanning every {args.watch:g}s (Ctrl+C to stop).")

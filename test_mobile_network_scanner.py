@@ -132,6 +132,78 @@ class TestGrabBanner:
         fake_sock.sendall.assert_not_called()
 
 
+class TestProbeTcpPort:
+    def test_returns_true_when_port_accepts_connection(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.connect_ex.return_value = 0
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            assert ms._probe_tcp_port("192.168.1.1", 80, timeout=0.1) is True
+
+    def test_returns_false_when_port_refuses_connection(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.connect_ex.return_value = 1
+
+        with patch("mobile_network_scanner.socket.socket", return_value=fake_sock):
+            assert ms._probe_tcp_port("192.168.1.1", 80, timeout=0.1) is False
+
+
+class TestFindRiskyPorts:
+    def test_reports_all_open_risky_ports_not_just_the_first(self):
+        def fake_probe(ip, port, timeout):
+            return port in (23, 3389)
+
+        with patch("mobile_network_scanner._probe_tcp_port", side_effect=fake_probe):
+            assert ms._find_risky_ports("192.168.1.1", timeout=0.1) == [23, 3389]
+
+    def test_returns_empty_list_when_none_open(self):
+        with patch("mobile_network_scanner._probe_tcp_port", return_value=False):
+            assert ms._find_risky_ports("192.168.1.1", timeout=0.1) == []
+
+
+class TestAttachRiskyPorts:
+    def test_fills_in_risky_ports_for_each_device(self):
+        devices = [{"ip": "192.168.1.1", "hostname": "", "port": 80, "banner": "", "risky_ports": []}]
+
+        with patch("mobile_network_scanner._find_risky_ports", return_value=[23]):
+            result = ms._attach_risky_ports(devices, timeout=0.1)
+
+        assert result[0]["risky_ports"] == [23]
+
+
+class TestUseColor:
+    def test_disabled_by_no_color_flag(self):
+        with patch("mobile_network_scanner.sys.stdout.isatty", return_value=True), \
+                patch.dict("mobile_network_scanner.os.environ", {}, clear=True):
+            assert ms._use_color(no_color_flag=True) is False
+
+    def test_disabled_by_no_color_env_var(self):
+        with patch("mobile_network_scanner.sys.stdout.isatty", return_value=True), \
+                patch.dict("mobile_network_scanner.os.environ", {"NO_COLOR": "1"}):
+            assert ms._use_color(no_color_flag=False) is False
+
+    def test_disabled_when_stdout_is_not_a_tty(self):
+        with patch("mobile_network_scanner.sys.stdout.isatty", return_value=False), \
+                patch.dict("mobile_network_scanner.os.environ", {}, clear=True):
+            assert ms._use_color(no_color_flag=False) is False
+
+    def test_enabled_when_none_of_the_above_apply(self):
+        with patch("mobile_network_scanner.sys.stdout.isatty", return_value=True), \
+                patch.dict("mobile_network_scanner.os.environ", {}, clear=True):
+            assert ms._use_color(no_color_flag=False) is True
+
+
+class TestColorize:
+    def test_wraps_text_in_ansi_codes_when_enabled(self):
+        result = ms._colorize("NEW", "green", enabled=True)
+        assert result == f"{ms._ANSI_CODES['green']}NEW{ms._ANSI_CODES['reset']}"
+
+    def test_returns_plain_text_when_disabled(self):
+        assert ms._colorize("NEW", "green", enabled=False) == "NEW"
+
+
 class TestDnsNameEncoding:
     def test_round_trips_a_simple_name(self):
         encoded = ms._encode_dns_name("72.1.168.192.in-addr.arpa")
@@ -421,6 +493,7 @@ class TestTcpScan:
 
         with patch("mobile_network_scanner.probe_host", side_effect=fake_probe), \
                 patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner._resolve_hostname", return_value=""):
             devices = ms.tcp_scan("192.168.1.0/28", timeout=0.1, max_workers=8)
 
@@ -434,10 +507,13 @@ class TestTcpScan:
         # cast-specific tests below for that.
         with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner._resolve_hostname", return_value="phone.local"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
-        assert {"ip": "192.168.1.1", "hostname": "phone.local", "port": 80, "banner": ""} in devices
+        assert {
+            "ip": "192.168.1.1", "hostname": "phone.local", "port": 80, "banner": "", "risky_ports": [],
+        } in devices
 
     def test_falls_back_to_mdns_when_reverse_dns_has_no_hostname(self):
         # Exercises the real _resolve_hostname (not mocked out), so this
@@ -446,6 +522,7 @@ class TestTcpScan:
         # triggering Cast service discovery (tested separately below).
         with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner.socket.gethostbyaddr", side_effect=socket.gaierror), \
                 patch("mobile_network_scanner.mdns_reverse_lookup", return_value="some-device.local"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, mdns_timeout=0.2)
@@ -455,11 +532,14 @@ class TestTcpScan:
     def test_uses_cast_service_name_when_chromecast_port_matches(self):
         with patch("mobile_network_scanner.probe_host", return_value=8009), \
                 patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner.mdns_service_lookup", return_value={"192.168.1.1": "Living Room TV"}), \
                 patch("mobile_network_scanner._resolve_hostname", return_value="should-not-be-used"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, mdns_timeout=0.2)
 
-        assert {"ip": "192.168.1.1", "hostname": "Living Room TV", "port": 8009, "banner": ""} in devices
+        assert {
+            "ip": "192.168.1.1", "hostname": "Living Room TV", "port": 8009, "banner": "", "risky_ports": [],
+        } in devices
 
     def test_falls_back_to_resolve_hostname_when_cast_lookup_has_no_name_for_ip(self):
         # mdns_service_lookup() might name some Cast devices on the
@@ -467,6 +547,7 @@ class TestTcpScan:
         # too late) - it should still get a chance via the normal path.
         with patch("mobile_network_scanner.probe_host", return_value=8009), \
                 patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner.mdns_service_lookup", return_value={}), \
                 patch("mobile_network_scanner._resolve_hostname", return_value="fallback.local"):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, mdns_timeout=0.2)
@@ -476,6 +557,7 @@ class TestTcpScan:
     def test_skips_cast_lookup_when_no_chromecast_port_present(self):
         with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner.mdns_service_lookup") as mock_cast_lookup, \
                 patch("mobile_network_scanner._resolve_hostname", return_value=""):
             ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
@@ -485,6 +567,7 @@ class TestTcpScan:
     def test_missing_hostname_defaults_to_empty_string(self):
         with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner._resolve_hostname", return_value=""):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
@@ -509,6 +592,7 @@ class TestTcpScan:
     def test_attaches_banner_from_grab_banner_for_each_matched_port(self):
         with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner.grab_banner", return_value="Server: lighttpd"), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner._resolve_hostname", return_value=""):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
@@ -517,6 +601,7 @@ class TestTcpScan:
     def test_grab_banner_called_with_each_device_matched_port(self):
         with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner.grab_banner", return_value="") as mock_grab_banner, \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner._resolve_hostname", return_value=""):
             ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
 
@@ -527,19 +612,43 @@ class TestTcpScan:
     def test_skips_banner_grabbing_when_disabled(self):
         with patch("mobile_network_scanner.probe_host", return_value=80), \
                 patch("mobile_network_scanner.grab_banner") as mock_grab_banner, \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
                 patch("mobile_network_scanner._resolve_hostname", return_value=""):
             devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, grab_banners=False)
 
         mock_grab_banner.assert_not_called()
         assert all(d["banner"] == "" for d in devices)
 
+    def test_attaches_risky_ports_from_find_risky_ports(self):
+        with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[23, 445]), \
+                patch("mobile_network_scanner._resolve_hostname", return_value=""):
+            devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4)
+
+        assert all(d["risky_ports"] == [23, 445] for d in devices)
+
+    def test_skips_risky_port_check_when_disabled(self):
+        with patch("mobile_network_scanner.probe_host", return_value=80), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports") as mock_find_risky_ports, \
+                patch("mobile_network_scanner._resolve_hostname", return_value=""):
+            devices = ms.tcp_scan("192.168.1.0/30", timeout=0.1, max_workers=4, check_risky_ports=False)
+
+        mock_find_risky_ports.assert_not_called()
+        assert all(d["risky_ports"] == [] for d in devices)
+
 
 class TestScanAllSubnets:
     def test_merges_devices_from_every_subnet(self):
-        def fake_tcp_scan(subnet, timeout, ports, max_workers, mdns_timeout, grab_banners):
+        def fake_tcp_scan(subnet, timeout, ports, max_workers, mdns_timeout, grab_banners, check_risky_ports):
             return {
-                "192.168.1.0/24": [{"ip": "192.168.1.5", "hostname": "", "port": 80, "banner": ""}],
-                "10.0.0.0/24": [{"ip": "10.0.0.9", "hostname": "nas.local", "port": 445, "banner": ""}],
+                "192.168.1.0/24": [
+                    {"ip": "192.168.1.5", "hostname": "", "port": 80, "banner": "", "risky_ports": []}
+                ],
+                "10.0.0.0/24": [
+                    {"ip": "10.0.0.9", "hostname": "nas.local", "port": 445, "banner": "", "risky_ports": []}
+                ],
             }[subnet]
 
         with patch("mobile_network_scanner.tcp_scan", side_effect=fake_tcp_scan):

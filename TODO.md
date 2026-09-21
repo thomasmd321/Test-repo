@@ -163,12 +163,27 @@ plain sockets and are fully portable:
       both a recognized port (8080) and an unrecognized one, confirming
       the fallback probe fires correctly on the latter.
 
-- [ ] **Risky-port flagging.** Pure TCP connect checks against a specific
+- [x] **Risky-port flagging.** Pure TCP connect checks against a specific
       port list - no special privileges needed, and the port-probing
       infrastructure already exists in this script.
+      Done: ported `RISKY_PORTS`/`_find_risky_ports()`/
+      `_attach_risky_ports()` from `network_scanner.py` verbatim (plus a
+      `_probe_tcp_port()` single-port helper the mobile script didn't
+      have yet), checked independently of the general port probe like on
+      desktop. Wired into `tcp_scan()`'s bulk scan; `--no-risky-ports` to
+      skip. Verified end-to-end against a real loopback listener on port
+      23 (telnet) that was deliberately excluded from `--ports`, and it
+      still showed up in the risky-ports summary.
 
-- [ ] **Colorized output.** Plain ANSI codes; a-Shell's terminal renders
+- [x] **Colorized output.** Plain ANSI codes; a-Shell's terminal renders
       them fine.
+      Done: ported `_ANSI_CODES`/`_use_color()`/`_colorize()` from
+      `network_scanner.py` verbatim, plus the same single-color-per-row
+      priority rule (risky > new > plain) that fixed the desktop
+      version's nested-reset bug. Verified end-to-end under a real pty
+      (`script -qc ...`) with `cat -v`, confirming a single, correctly
+      paired start/reset code per line and no color bleeding between
+      rows.
 
 - [ ] **Custom device labels/aliases** and **export scan results to
       CSV/JSON** (see the shared ideas above) - neither is platform-

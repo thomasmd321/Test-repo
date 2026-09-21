@@ -180,6 +180,28 @@ faster scan.
 python mobile_network_scanner.py --no-banners
 ```
 
+Every live device is also independently checked against `RISKY_PORTS` -
+a short list of ports (telnet, FTP, SMB, RDP, VNC) worth a second look if
+left open on a home network - regardless of which port the general probe
+above happened to match first. A device exposing one gets flagged in a
+summary section after the results table, along with why each port is
+considered risky. This is a basic hygiene check, not a security audit;
+pass `--no-risky-ports` to skip it while keeping the general probe.
+
+```
+python mobile_network_scanner.py --no-risky-ports
+```
+
+Output is colorized (green for a NEW device, red for one exposing a
+risky port - red wins if both apply, though the NEW marker text is still
+visible either way) using plain ANSI escape codes; no extra dependency.
+Auto-disables when stdout isn't a terminal (e.g. piped to a file), and
+also respects `--no-color` or the `NO_COLOR` env var.
+
+```
+python mobile_network_scanner.py --no-color
+```
+
 Hostnames are resolved in this order, all built in with no extra
 dependency:
 1. **DNS-SD Cast service discovery** — for anything answering on the
