@@ -73,3 +73,47 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       Also had to widen the results table's IP column (18 → 42 chars)
       after testing showed a real IPv6 address running straight into
       the MAC column with no separating space.
+
+- [x] **Banner grabbing on open ports** (`network_scanner.py`). Identification
+      currently stops at "port 8443 is open" — actually reading what a
+      service sends back (an HTTP `Server:` header, an SSH version
+      string, etc.) often reveals a device outright without needing a
+      browser.
+      Done: `grab_banner()` — listens for an unprompted banner (SSH,
+      FTP, etc.), sends a bare `HEAD /` for recognized HTTP(S) ports,
+      and for everything else tries listening first, falling back to an
+      HTTP probe if nothing arrived (many IoT admin UIs run HTTP on
+      non-standard ports). Verified against real local HTTP servers,
+      including one on an unrecognized port to confirm the fallback
+      actually fires.
+
+- [x] **Single-device "deep dive" mode** (`--identify IP`). The bulk scan
+      is tuned for speed across up to 254 hosts, so it can't afford long
+      timeouts or a wide port list. A dedicated one-off command could
+      spend much more time investigating a single host: many more
+      ports, a banner-grab on each open one, and the full hostname/
+      vendor resolution chain — for exactly the kind of mystery device
+      the bulk scan leaves unidentified.
+      Done: `identify_device()` + `--identify IP` on `network_scanner.py`.
+      Probes `_IDENTIFY_PORTS` (a much broader list than the bulk scan
+      uses, since it's paid once per invocation rather than once per
+      host in a /24), grabs a banner from each open one, gets a MAC via
+      a direct single-host ARP request (falling back to ping + reading
+      the ARP cache), and runs the same hostname/vendor resolution the
+      bulk scan uses. Bypasses subnet resolution, known-device tracking,
+      and `--watch` entirely - it's a one-off investigation, not a scan.
+
+- [ ] **Port scanning for `network_scanner.py`.** It currently only does
+      ARP/ping — no port info at all, unlike `mobile_network_scanner.py`'s
+      `PORT_SERVICES` fingerprinting. Porting that over (as an optional
+      supplement to ARP, not a replacement) would help identify
+      blank-hostname devices the same way it already does on the phone.
+
+- [ ] **Risky-port flagging.** Mark devices exposing things like telnet
+      (23), unauthenticated RDP (3389), or SMB (445) with a visible
+      warning — a basic home-network hygiene check. Cheap once port
+      scanning (above) exists.
+
+- [ ] **Colorized terminal output.** Green for NEW, dim/red for missing,
+      using plain ANSI escape codes (no new dependency). Readability
+      only, no functional change.

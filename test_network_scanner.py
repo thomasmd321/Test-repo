@@ -747,6 +747,185 @@ class TestIpv6NeighborScan:
             assert ns.ipv6_neighbor_scan(timeout=1.0) == []
 
 
+class TestProbeTcpPort:
+    def test_returns_true_when_port_accepts_connection(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.connect_ex.return_value = 0
+
+        with patch("network_scanner.socket.socket", return_value=fake_sock):
+            assert ns._probe_tcp_port("192.168.1.1", 80, timeout=0.1) is True
+
+    def test_returns_false_when_port_refuses_connection(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.connect_ex.return_value = 1
+
+        with patch("network_scanner.socket.socket", return_value=fake_sock):
+            assert ns._probe_tcp_port("192.168.1.1", 80, timeout=0.1) is False
+
+
+class TestSummarizeBanner:
+    def test_prefers_server_header_over_status_line(self):
+        data = b"HTTP/1.1 200 OK\r\nServer: lighttpd/1.4.55\r\nContent-Length: 0\r\n\r\n"
+        assert ns._summarize_banner(data) == "HTTP/1.1 200 OK  |  Server: lighttpd/1.4.55"
+
+    def test_returns_first_line_when_no_server_header(self):
+        data = b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3\r\n"
+        assert ns._summarize_banner(data) == "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"
+
+    def test_returns_empty_string_for_blank_data(self):
+        assert ns._summarize_banner(b"\r\n\r\n   \r\n") == ""
+
+    def test_truncates_long_lines(self):
+        data = ("x" * 300).encode("ascii") + b"\r\n"
+        assert len(ns._summarize_banner(data)) == 120
+
+
+class TestGrabBanner:
+    def test_sends_head_request_on_http_port(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recv.return_value = b"HTTP/1.1 200 OK\r\nServer: nginx\r\n\r\n"
+
+        with patch("network_scanner.socket.socket", return_value=fake_sock):
+            result = ns.grab_banner("192.168.1.1", 80, timeout=0.5)
+
+        assert "nginx" in result
+        sent = fake_sock.sendall.call_args[0][0]
+        assert sent.startswith(b"HEAD / HTTP/1.0")
+
+    def test_reads_unprompted_banner_on_non_http_port(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recv.return_value = b"SSH-2.0-OpenSSH_8.9p1\r\n"
+
+        with patch("network_scanner.socket.socket", return_value=fake_sock):
+            result = ns.grab_banner("192.168.1.1", 22, timeout=0.5)
+
+        assert result == "SSH-2.0-OpenSSH_8.9p1"
+        fake_sock.sendall.assert_not_called()
+
+    def test_wraps_https_port_in_tls(self):
+        fake_raw_sock = MagicMock()
+        fake_raw_sock.__enter__.return_value = fake_raw_sock
+        fake_wrapped_sock = MagicMock()
+        fake_wrapped_sock.recv.return_value = b"HTTP/1.1 401 Unauthorized\r\nServer: lighttpd\r\n\r\n"
+
+        fake_context = MagicMock()
+        fake_context.wrap_socket.return_value = fake_wrapped_sock
+
+        with patch("network_scanner.socket.socket", return_value=fake_raw_sock), \
+                patch("network_scanner.ssl.create_default_context", return_value=fake_context):
+            result = ns.grab_banner("192.168.1.1", 8443, timeout=0.5)
+
+        assert "lighttpd" in result
+        assert fake_context.check_hostname is False
+        fake_wrapped_sock.sendall.assert_called_once()
+
+    def test_returns_empty_string_on_connection_failure(self):
+        with patch("network_scanner.socket.socket", side_effect=OSError("Connection refused")):
+            assert ns.grab_banner("192.168.1.1", 80, timeout=0.5) == ""
+
+    def test_falls_back_to_http_probe_on_unrecognized_silent_port(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        # First recv() (passive listen) times out; second recv() (after
+        # the HTTP fallback probe) returns a real response.
+        fake_sock.recv.side_effect = [socket.timeout, b"HTTP/1.1 200 OK\r\nServer: mystery-iot\r\n\r\n"]
+
+        with patch("network_scanner.socket.socket", return_value=fake_sock):
+            result = ns.grab_banner("192.168.1.1", 9999, timeout=0.5)
+
+        assert "mystery-iot" in result
+        fake_sock.sendall.assert_called_once()
+
+    def test_does_not_send_http_probe_when_unrecognized_port_already_answered(self):
+        fake_sock = MagicMock()
+        fake_sock.__enter__.return_value = fake_sock
+        fake_sock.recv.return_value = b"220 example-ftp ready\r\n"
+
+        with patch("network_scanner.socket.socket", return_value=fake_sock):
+            result = ns.grab_banner("192.168.1.1", 9999, timeout=0.5)
+
+        assert result == "220 example-ftp ready"
+        fake_sock.sendall.assert_not_called()
+
+
+class TestGetDeviceMac:
+    def test_prefers_direct_arp_request(self):
+        with patch("network_scanner.arp_scan", return_value=[{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "", "vendor": ""}]), \
+                patch("network_scanner.ping") as mock_ping:
+            assert ns._get_device_mac("192.168.1.1", timeout=1.0) == "aa:bb:cc:dd:ee:ff"
+
+        mock_ping.assert_not_called()
+
+    def test_falls_back_to_ping_and_arp_cache_when_arp_scan_unavailable(self):
+        with patch("network_scanner.arp_scan", side_effect=ImportError), \
+                patch("network_scanner.ping", return_value=True) as mock_ping, \
+                patch("network_scanner.read_arp_table", return_value={"192.168.1.1": "aa:bb:cc:dd:ee:ff"}):
+            assert ns._get_device_mac("192.168.1.1", timeout=1.0) == "aa:bb:cc:dd:ee:ff"
+
+        mock_ping.assert_called_once()
+
+    def test_returns_empty_string_when_nothing_found(self):
+        with patch("network_scanner.arp_scan", side_effect=ImportError), \
+                patch("network_scanner.ping", return_value=False), \
+                patch("network_scanner.read_arp_table", return_value={}):
+            assert ns._get_device_mac("192.168.1.1", timeout=1.0) == ""
+
+    def test_survives_missing_ping_binary(self):
+        with patch("network_scanner.arp_scan", side_effect=ImportError), \
+                patch("network_scanner.ping", side_effect=RuntimeError("no ping")), \
+                patch("network_scanner.read_arp_table", return_value={}):
+            assert ns._get_device_mac("192.168.1.1", timeout=1.0) == ""
+
+
+class TestIdentifyDevice:
+    def test_reports_open_ports_with_service_and_banner(self):
+        def fake_probe(ip, port, timeout):
+            return port in (22, 80)
+
+        with patch("network_scanner._get_device_mac", return_value="aa:bb:cc:dd:ee:ff"), \
+                patch("network_scanner._probe_tcp_port", side_effect=fake_probe), \
+                patch("network_scanner.grab_banner", return_value="SSH-2.0-OpenSSH"), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_vendor_names", side_effect=lambda devices: devices):
+            device = ns.identify_device("192.168.1.1", ports=[22, 23, 80], timeout=0.1)
+
+        assert device["mac"] == "aa:bb:cc:dd:ee:ff"
+        ports_found = {entry["port"] for entry in device["open_ports"]}
+        assert ports_found == {22, 80}
+        assert all(entry["banner"] == "SSH-2.0-OpenSSH" for entry in device["open_ports"])
+        assert device["open_ports"][0]["service"] == "ssh"
+
+    def test_no_open_ports_returns_empty_list(self):
+        with patch("network_scanner._get_device_mac", return_value=""), \
+                patch("network_scanner._probe_tcp_port", return_value=False), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices):
+            device = ns.identify_device("192.168.1.1", ports=[22, 80], timeout=0.1)
+
+        assert device["open_ports"] == []
+
+    def test_skips_vendor_lookup_when_no_mac_found(self):
+        with patch("network_scanner._get_device_mac", return_value=""), \
+                patch("network_scanner._probe_tcp_port", return_value=False), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_vendor_names") as mock_vendor:
+            ns.identify_device("192.168.1.1", ports=[22], timeout=0.1)
+
+        mock_vendor.assert_not_called()
+
+    def test_skips_vendor_lookup_when_disabled(self):
+        with patch("network_scanner._get_device_mac", return_value="aa:bb:cc:dd:ee:ff"), \
+                patch("network_scanner._probe_tcp_port", return_value=False), \
+                patch("network_scanner._resolve_missing_hostnames", side_effect=lambda devices, timeout: devices), \
+                patch("network_scanner._attach_vendor_names") as mock_vendor:
+            ns.identify_device("192.168.1.1", ports=[22], timeout=0.1, vendor_lookup=False)
+
+        mock_vendor.assert_not_called()
+
+
 class TestScan:
     def test_prefers_arp_scan_when_it_succeeds(self):
         expected = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff"}]

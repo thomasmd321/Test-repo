@@ -84,6 +84,30 @@ Known limitations of this first pass:
   nibble format). MAC vendor lookup still works normally, since it
   doesn't care which IP version found the MAC.
 
+**Single-device deep dive (`--identify IP`):** the bulk scan is tuned for
+speed across up to 254 hosts, so it can't afford long timeouts or a wide
+port list — which is exactly why some devices come back with no
+hostname, no vendor, and no clue what they are. `--identify` instead
+investigates one specific host thoroughly: many more ports (including
+things like FTP, SMTP, MySQL, Redis, Plex, and printers — see
+`_IDENTIFY_PORTS`), a banner-grab attempt on each one that's open, and
+the full hostname/vendor resolution chain with more generous timeouts.
+
+```
+python network_scanner.py --identify 192.168.1.26
+```
+
+Banner grabbing (`grab_banner()`) reads whatever a service reveals about
+itself right after connecting — many protocols announce themselves
+unprompted (SSH sends its version string outright), and HTTP(S) servers
+reveal a lot in response to even a bare `HEAD /` request. For a port
+outside the well-known HTTP set, it tries listening first and only sends
+an HTTP probe if nothing arrived — since plenty of IoT admin UIs (again,
+exactly the kind of device this mode exists for) run HTTP on
+non-standard ports. Not every service says anything at all: binary
+protocols like SMB or RDP just report no banner, the same as a closed
+port would.
+
 ### `mobile_network_scanner.py`
 
 For sandboxed Python runtimes that can't spawn subprocesses or open raw

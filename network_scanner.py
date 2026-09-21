@@ -43,6 +43,7 @@ import platform
 import re
 import shutil
 import socket
+import ssl
 import struct
 import subprocess
 import time
@@ -1150,6 +1151,259 @@ def ipv6_neighbor_scan(timeout: float = 2.0) -> List[Device]:
     return sorted(devices, key=lambda d: ipaddress.ip_address(d["ip"]))
 
 
+# --- Single-device deep dive (--identify) ---
+#
+# scan_all_subnets() is tuned for speed across up to 254 hosts at once,
+# which means short timeouts and a narrow, common-case port list - fine
+# for a bulk overview, but it's exactly why some devices come back with
+# no hostname, no vendor, and no clue what they are. identify_device()
+# is the opposite trade-off: given one specific host, it can afford to
+# try far more ports, read back whatever each open one reveals about
+# itself (a "banner"), and run the full hostname-resolution chain with
+# more generous timeouts - a "tell me everything you can" command for
+# exactly the kind of mystery device the bulk scan leaves unidentified.
+
+# A broader set of ports than DEFAULT_PORTS/mobile_network_scanner.py's
+# DEFAULT_PORTS - deliberately wider since this only ever probes one
+# host, not 254 of them, so the extra time cost of a longer list is
+# paid once, not multiplied across a whole subnet.
+_IDENTIFY_PORTS: Tuple[int, ...] = (
+    21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 554, 587, 993, 995,
+    1883, 1900, 3306, 3389, 5000, 5353, 5432, 6379, 7000, 8000, 8009,
+    8080, 8081, 8443, 9100, 32400, 62078,
+)
+
+# Short, human-readable labels for _IDENTIFY_PORTS, printed alongside
+# each open port - a hint at what's running there, not a certainty.
+_IDENTIFY_PORT_SERVICES: Dict[int, str] = {
+    21: "ftp",
+    22: "ssh",
+    23: "telnet",
+    25: "smtp",
+    53: "dns",
+    80: "http",
+    110: "pop3",
+    139: "netbios",
+    143: "imap",
+    443: "https",
+    445: "smb",
+    554: "rtsp (camera/streaming)",
+    587: "smtp-submission",
+    993: "imaps",
+    995: "pop3s",
+    1883: "mqtt",
+    1900: "ssdp/upnp",
+    3306: "mysql",
+    3389: "rdp",
+    5000: "upnp/airplay",
+    5353: "mdns/bonjour",
+    5432: "postgresql",
+    6379: "redis",
+    7000: "airplay",
+    8000: "http-alt",
+    8009: "chromecast",
+    8080: "http-alt",
+    8081: "http-alt",
+    8443: "https-alt",
+    9100: "printer (jetdirect)",
+    32400: "plex",
+    62078: "lockdownd (iOS)",
+}
+
+# Ports where sending a plain HTTP request makes sense - other ports
+# are just listened to, in case the service announces itself unprompted
+# (SSH, FTP, SMTP, and several others send a startup banner outright).
+_HTTP_PORTS = frozenset({80, 8000, 8080, 8081})
+_HTTPS_PORTS = frozenset({443, 8443})
+
+
+def _probe_tcp_port(ip: str, port: int, timeout: float) -> bool:
+    """Return True if ip accepts a TCP connection on port.
+
+    The same connect_ex-based check mobile_network_scanner.py's
+    probe_host() uses, just for a single port rather than trying a list
+    of them in order - identify_device() already parallelizes across
+    ports itself, so there's no need for this to also stop early.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        return sock.connect_ex((ip, port)) == 0
+
+
+def _summarize_banner(data: bytes) -> str:
+    """Reduce raw banner bytes to one short, printable line.
+
+    Args:
+        data: Whatever bytes came back from the service.
+
+    Returns:
+        The most identifying single line found - preferring an HTTP
+        "Server:" header over that response's generic status line,
+        since the status line looks the same for every server - or ""
+        if data contained nothing but blank lines.
+    """
+    text = data.decode("utf-8", errors="replace")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    for line in lines:
+        if line.lower().startswith("server:"):
+            return line if line == lines[0] else f"{lines[0]}  |  {line}"
+
+    return lines[0][:120]
+
+
+def grab_banner(ip: str, port: int, timeout: float) -> str:
+    """Best-effort read of whatever a service on ip:port reveals about itself.
+
+    Many protocols announce themselves unprompted right after the TCP
+    handshake - SSH sends "SSH-2.0-..." outright, for instance - and
+    HTTP(S) servers reveal a lot in response to even a bare HEAD request
+    with no real path or Host header. Neither is guaranteed: a service
+    that stays silent (most binary protocols - SMB, RDP, etc.) just
+    yields "" here, the same as if nothing were listening at all.
+
+    Ports outside the recognized HTTP(S) sets get a two-step attempt:
+    listen first (catches unprompted-banner protocols like SSH), and if
+    nothing arrives, send an HTTP probe anyway - plenty of services
+    (especially IoT admin UIs, which is exactly the kind of device this
+    whole deep-dive mode exists to help identify) run HTTP on ports
+    outside the well-known set. This can take up to roughly 2x timeout
+    for a port that answers neither way, which is an acceptable cost
+    here: grab_banner() is only ever called on already-open ports in a
+    deliberately slow, thorough single-host mode, not across a whole
+    subnet.
+
+    Args:
+        ip: The target host's address.
+        port: A TCP port already confirmed open by the caller - this
+            doesn't itself check for a listener.
+        timeout: How long to wait for each read attempt, in seconds.
+
+    Returns:
+        A short, human-readable snippet of whatever came back, or ""
+        if the connection failed or nothing useful was received.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as raw_sock:
+            raw_sock.settimeout(timeout)
+            raw_sock.connect((ip, port))
+
+            if port in _HTTPS_PORTS:
+                # Most self-hosted admin UIs (routers, cameras, NAS
+                # boxes) use a self-signed certificate, so verification
+                # is deliberately disabled here - this is read-only
+                # reconnaissance against a device on the caller's own
+                # network, not a security-sensitive connection that
+                # needs certificate trust.
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                sock = context.wrap_socket(raw_sock, server_hostname=ip)
+            else:
+                sock = raw_sock
+
+            http_request = f"HEAD / HTTP/1.0\r\nHost: {ip}\r\n\r\n".encode("ascii", errors="replace")
+
+            if port in _HTTP_PORTS or port in _HTTPS_PORTS:
+                sock.sendall(http_request)
+                data = sock.recv(1024)
+            else:
+                try:
+                    data = sock.recv(1024)
+                except socket.timeout:
+                    data = b""
+                if not data:
+                    sock.sendall(http_request)
+                    data = sock.recv(1024)
+    except (OSError, ssl.SSLError):
+        return ""
+
+    return _summarize_banner(data)
+
+
+def _get_device_mac(ip: str, timeout: float) -> str:
+    """Best-effort single-host MAC lookup for identify_device().
+
+    Tries a direct ARP request first - scapy targeting just this one
+    address via a "/32" pseudo-subnet, rather than the whole subnet
+    arp_scan() is normally given - falling back to pinging the host and
+    reading whatever landed in the OS's ARP cache, the same two-step
+    approach ping_sweep() uses across a whole subnet, just for one host.
+
+    Returns:
+        A lowercase, colon-separated MAC address, or "" if neither
+        method found one (no scapy/permissions for the ARP request, and
+        the host either didn't answer a ping or wasn't in the ARP cache
+        anyway).
+    """
+    try:
+        answered = arp_scan(f"{ip}/32", timeout)
+        if answered:
+            return answered[0]["mac"]
+    except (ImportError, PermissionError, OSError):
+        pass
+
+    try:
+        ping(ip, timeout)  # Best-effort: populate the ARP cache if reachable.
+    except RuntimeError:
+        pass  # No `ping` binary - can't populate the cache this way either.
+    return read_arp_table().get(ip, "")
+
+
+def identify_device(
+    ip: str,
+    ports: Iterable[int] = _IDENTIFY_PORTS,
+    timeout: float = 1.0,
+    mdns_timeout: float = 1.0,
+    vendor_lookup: bool = True,
+) -> dict:
+    """Run a slow, thorough investigation of a single host.
+
+    See this section's module-level comment for how this differs from
+    scan_all_subnets(): more ports, banner-grabbing, and more generous
+    timeouts, all afforded by only ever looking at one host at a time.
+
+    Args:
+        ip: The host to investigate.
+        ports: TCP ports to probe (see _IDENTIFY_PORTS).
+        timeout: Per-port connect/banner timeout, in seconds.
+        mdns_timeout: Timeout for the mDNS/DNS-SD hostname fallback.
+        vendor_lookup: Whether to look up the MAC vendor, if a MAC is
+            found at all.
+
+    Returns:
+        {"ip", "mac", "hostname", "vendor", "open_ports"}, where
+        open_ports is a list of {"port", "service", "banner"} sorted by
+        port number - "service" is a guess from _IDENTIFY_PORT_SERVICES
+        (or "?" if the port isn't in it), and "banner" is "" if
+        grab_banner() found nothing.
+    """
+    device: Device = {"ip": ip, "mac": _get_device_mac(ip, timeout), "hostname": "", "vendor": ""}
+
+    ports = list(ports)
+    with ThreadPoolExecutor(max_workers=max(1, min(32, len(ports)))) as executor:
+        futures = {executor.submit(_probe_tcp_port, ip, port, timeout): port for port in ports}
+        open_ports = sorted(futures[future] for future in as_completed(futures) if future.result())
+
+    open_port_info = []
+    with ThreadPoolExecutor(max_workers=max(1, min(16, len(open_ports)))) as executor:
+        futures = {executor.submit(grab_banner, ip, port, timeout): port for port in open_ports}
+        for future in as_completed(futures):
+            port = futures[future]
+            open_port_info.append(
+                {"port": port, "service": _IDENTIFY_PORT_SERVICES.get(port, "?"), "banner": future.result()}
+            )
+
+    [device] = _resolve_missing_hostnames([device], mdns_timeout)
+    if vendor_lookup and device["mac"]:
+        [device] = _attach_vendor_names([device])
+
+    device["open_ports"] = sorted(open_port_info, key=lambda entry: entry["port"])
+    return device
+
+
 def scan(subnet: str, timeout: float) -> List[Device]:
     """Scan the subnet, preferring an ARP scan and falling back to a ping sweep.
 
@@ -1173,6 +1427,23 @@ def scan(subnet: str, timeout: float) -> List[Device]:
         return ping_sweep(subnet, timeout)
 
 
+def _print_identify_report(device: dict) -> None:
+    """Print identify_device()'s result as a readable single-host report."""
+    print(f"\n=== {device['ip']} ===")
+    print(f"MAC:      {device['mac'] or '(unknown)'}")
+    print(f"Vendor:   {device['vendor'] or '(unknown)'}")
+    print(f"Hostname: {device['hostname'] or '(none found)'}")
+
+    if not device["open_ports"]:
+        print("\nNo open ports found among the ports probed.")
+        return
+
+    print(f"\n{len(device['open_ports'])} open port(s):")
+    for entry in device["open_ports"]:
+        banner = entry["banner"] or "(no banner)"
+        print(f"  {entry['port']:<6} {entry['service']:<24} {banner}")
+
+
 def main() -> None:
     """CLI entry point: parse arguments, run the scan, and print a results table."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1185,6 +1456,13 @@ def main() -> None:
         "--all-subnets",
         action="store_true",
         help="Auto-detect and scan every local subnet this machine has an interface on (requires `pip install psutil`), instead of just the one on the default route",
+    )
+    parser.add_argument(
+        "--identify",
+        type=str,
+        default=None,
+        metavar="IP",
+        help="Skip the network scan and instead do a slow, thorough investigation of a single host: try many more ports, grab a banner from anything open, and resolve its hostname/vendor (see identify_device())",
     )
     parser.add_argument("--timeout", type=float, default=1.0, help="Timeout in seconds per host (default: 1.0)")
     parser.add_argument(
@@ -1232,6 +1510,20 @@ def main() -> None:
         help="Roughly how long to spend on IPv6 discovery, in seconds (default: 2.0)",
     )
     args = parser.parse_args()
+
+    if args.identify:
+        # A wholly different mode from everything below: one host,
+        # investigated thoroughly, instead of many hosts scanned
+        # quickly - so it bypasses subnet resolution, known-device
+        # tracking, and --watch entirely, and exits as soon as it's done.
+        device = identify_device(
+            args.identify,
+            timeout=args.timeout,
+            mdns_timeout=args.mdns_timeout,
+            vendor_lookup=not args.no_vendor_lookup,
+        )
+        _print_identify_report(device)
+        return
 
     # Precedence: an explicit subnet argument always wins; otherwise
     # --all-subnets scans everything psutil can see; otherwise fall back
