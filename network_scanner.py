@@ -41,6 +41,7 @@ import ipaddress
 import json
 import platform
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -985,6 +986,170 @@ def _find_missing_devices(devices: List[Device], known_devices_path: Path = _KNO
     return sorted(missing, key=lambda entry: entry["key"])
 
 
+# --- IPv6 neighbor discovery ---
+#
+# Everything above assumes IPv4: arp_scan() and ping_sweep() are both
+# given a subnet to enumerate, which works because a /24 has only 254
+# addresses. An IPv6 /64 has 2**64 - brute-force enumeration the way
+# ping_sweep() does for IPv4 simply isn't feasible. IPv6-connected
+# devices are still discoverable, just differently: a single ICMPv6
+# echo request to the link's all-nodes multicast address (ff02::1)
+# reaches every IPv6-enabled device on the local link at once (this is
+# IPv6's rough equivalent of arp_scan()'s ARP broadcast), and replies
+# populate the OS's IPv6 neighbor cache - NDP's equivalent of the ARP
+# cache read_arp_table() already parses - which is then read back out.
+#
+# This is intentionally more limited than the IPv4 path: Linux and
+# macOS only (the neighbor-table command and its output format differ
+# enough on Windows that it isn't attempted here), and no hostname
+# resolution - mdns_reverse_lookup() builds an IPv4-style
+# "x.x.x.x.in-addr.arpa" reverse name that wouldn't mean anything for
+# an IPv6 address (IPv6 reverse DNS uses a different "ip6.arpa" nibble
+# format entirely). Vendor lookup still works fine, since it's a pure
+# MAC-address lookup that doesn't care what IP version found the MAC.
+
+
+def _list_scan_interfaces() -> List[str]:
+    """Return non-loopback network interface names to probe for IPv6 devices.
+
+    Uses socket.if_nameindex() - standard library on Linux and macOS
+    (and Windows since Python 3.8) - rather than requiring psutil, so
+    IPv6 discovery doesn't need yet another optional dependency on top
+    of the ones --all-subnets already introduced.
+
+    Returns:
+        Interface names (e.g. ["eth0", "wlan0"]), or [] if the platform
+        doesn't support if_nameindex() or none were found.
+    """
+    try:
+        return [name for _index, name in socket.if_nameindex() if name != "lo"]
+    except (AttributeError, OSError):
+        return []
+
+
+def _ping_ipv6_multicast(interface: str, timeout: float) -> None:
+    """Send ICMPv6 echoes to the local link's all-nodes multicast address.
+
+    This doesn't return anything meaningful - the actual result is
+    whatever ends up in the OS's IPv6 neighbor cache afterward, read
+    separately by read_ipv6_neighbor_table(). A missing ping binary, an
+    unsupported platform, or simply no replies all look the same here:
+    nothing happens, and the neighbor cache just doesn't gain any new
+    entries from this interface.
+
+    Args:
+        interface: The interface name to scope the multicast ping to -
+            required for a link-local destination like ff02::1 to mean
+            anything (unlike a globally-routable address, it's only
+            valid relative to a specific link).
+        timeout: Roughly how long to spend probing, in seconds.
+    """
+    is_windows = platform.system().lower() == "windows"
+    if is_windows:
+        # Windows' ping needs the interface's numeric *index* after a
+        # "%", not its name - resolving that portably is more platform-
+        # specific code than this best-effort path is worth, so this
+        # will typically just find nothing on Windows rather than crash.
+        command = ["ping", "-6", "-n", "3", "-w", str(int(timeout * 1000)), "ff02::1"]
+    else:
+        # -I scopes the multicast ping to a specific interface; -c 3
+        # spaces three requests roughly a second apart, giving slower-
+        # to-reply devices more than one chance to be caught.
+        ping_binary = "ping6" if shutil.which("ping6") else "ping"
+        command = [ping_binary, "-6", "-c", "3", "-I", interface, "-W", str(max(1, int(timeout))), "ff02::1"]
+
+    try:
+        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout + 3)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # No ping binary, this platform's ping doesn't understand these
+        # flags, or it just ran long - either way, treat it the same as
+        # "no replies," not a fatal error for the whole scan.
+        pass
+
+
+def read_ipv6_neighbor_table() -> Dict[str, str]:
+    """Parse the OS's IPv6 neighbor cache into a map of IPv6 address -> MAC.
+
+    IPv6's equivalent of read_arp_table(): the neighbor cache, populated
+    by ICMPv6 Neighbor Discovery instead of ARP, mapping addresses to
+    the link-layer (MAC) addresses of hosts this machine has recently
+    exchanged packets with.
+
+    Linux and macOS only - see this section's module-level comment for
+    why Windows isn't attempted.
+
+    Returns:
+        A dict mapping IPv6 address strings (with any zone-id suffix
+        like "%eth0" stripped) to lowercase, colon-separated MAC
+        address strings. Empty on Windows, or if the platform's
+        neighbor-table command isn't available.
+    """
+    is_macos = platform.system().lower() == "darwin"
+    command = ["ndp", "-a"] if is_macos else ["ip", "-6", "neigh", "show"]
+
+    try:
+        output = subprocess.run(command, capture_output=True, text=True, check=False).stdout
+    except FileNotFoundError:
+        return {}
+
+    mac_pattern = re.compile(r"([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
+
+    table: Dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+
+        # Both `ip -6 neigh show` and `ndp -a` put the address first on
+        # each line; macOS's ndp suffixes it with a zone id (e.g. "%en0")
+        # that isn't part of the address itself. Requiring a colon
+        # filters out header/label lines (ndp's column headers, blank
+        # separators) that have no address in that position at all.
+        address = parts[0].split("%")[0]
+        mac_match = mac_pattern.search(line)
+        if mac_match and ":" in address:
+            table[address] = mac_match.group().replace("-", ":").lower()
+
+    return table
+
+
+def ipv6_neighbor_scan(timeout: float = 2.0) -> List[Device]:
+    """Discover IPv6 devices on the local link via multicast ping + NDP.
+
+    Unlike arp_scan()/ping_sweep(), this takes no subnet argument - see
+    this section's module-level comment for why brute-force enumeration
+    isn't feasible for IPv6. Instead, every local interface gets a
+    multicast ping (see _ping_ipv6_multicast()), and then the OS's own
+    neighbor cache is read back out in one pass across however many
+    interfaces just got probed.
+
+    Args:
+        timeout: Roughly how long to spend probing each interface and
+            waiting for replies, in seconds.
+
+    Returns:
+        Discovered devices sorted by IPv6 address, with "hostname" and
+        "vendor" both left as "" - callers that want vendor names filled
+        in should run this through _attach_vendor_names() themselves,
+        the same utility scan_all_subnets() uses for IPv4 devices.
+    """
+    for interface in _list_scan_interfaces():
+        _ping_ipv6_multicast(interface, timeout)
+
+    neighbors = read_ipv6_neighbor_table()
+
+    devices: List[Device] = []
+    for address, mac in neighbors.items():
+        # The neighbor cache can include multicast/loopback entries
+        # that aren't real neighboring devices - skip anything that
+        # isn't an ordinary unicast address.
+        if address == "::1" or address.lower().startswith("ff"):
+            continue
+        devices.append({"ip": address, "mac": mac, "hostname": "", "vendor": ""})
+
+    return sorted(devices, key=lambda d: ipaddress.ip_address(d["ip"]))
+
+
 def scan(subnet: str, timeout: float) -> List[Device]:
     """Scan the subnet, preferring an ARP scan and falling back to a ping sweep.
 
@@ -1055,6 +1220,17 @@ def main() -> None:
         action="store_true",
         help="Clear the known-devices registry before scanning, so every device found in this run is marked NEW",
     )
+    parser.add_argument(
+        "--ipv6",
+        action="store_true",
+        help="Also discover IPv6 devices on the local link via multicast ping + NDP (Linux/macOS only; see ipv6_neighbor_scan())",
+    )
+    parser.add_argument(
+        "--ipv6-timeout",
+        type=float,
+        default=2.0,
+        help="Roughly how long to spend on IPv6 discovery, in seconds (default: 2.0)",
+    )
     args = parser.parse_args()
 
     # Precedence: an explicit subnet argument always wins; otherwise
@@ -1092,6 +1268,20 @@ def main() -> None:
             print(f"Error: {exc}")
             raise SystemExit(1)
 
+        if args.ipv6:
+            print("Also probing for IPv6 devices (multicast ping + NDP, Linux/macOS only) ...")
+            ipv6_devices = ipv6_neighbor_scan(timeout=args.ipv6_timeout)
+            if not args.no_vendor_lookup:
+                ipv6_devices = _attach_vendor_names(ipv6_devices, force_refresh=args.refresh_vendor_db)
+            # Concatenated, not merged into one sorted list: comparing
+            # an IPv4Address to an IPv6Address raises in the ipaddress
+            # module, so IPv4 and IPv6 devices can't share one sort key.
+            # They print in the same table regardless - IPv4 addresses
+            # first (already sorted among themselves), then IPv6
+            # addresses (also sorted among themselves) below them,
+            # rather than interleaved by numeric value.
+            devices = devices + ipv6_devices
+
         if not devices:
             print("No devices found.")
             return
@@ -1111,9 +1301,13 @@ def main() -> None:
 
         # A leading marker column (rather than reflowing every other
         # column's width) keeps a NEW device visually obvious without
-        # disturbing the table's layout when tracking is off.
-        print(f"\n{'':<5}{'IP Address':<18}{'MAC Address':<20}{'Vendor':<24}Hostname")
-        print("-" * 95)
+        # disturbing the table's layout when tracking is off. The IP
+        # column is 42 wide (not the IPv4-sized 18 from before --ipv6
+        # existed) so a full IPv6 address - up to 39 characters - still
+        # gets a separating gap before the MAC column instead of running
+        # straight into it.
+        print(f"\n{'':<5}{'IP Address':<42}{'MAC Address':<20}{'Vendor':<24}Hostname")
+        print("-" * 119)
         new_count = 0
         for device in devices:
             # "-" as a placeholder makes it visually obvious that a
@@ -1125,7 +1319,7 @@ def main() -> None:
                 new_count += 1
             else:
                 marker = "     "
-            print(f"{marker}{device['ip']:<18}{mac_display:<20}{vendor_display:<24}{device.get('hostname', '')}")
+            print(f"{marker}{device['ip']:<42}{mac_display:<20}{vendor_display:<24}{device.get('hostname', '')}")
 
         print(f"\n{len(devices)} device(s) found.", end="")
         if not args.no_track_devices:

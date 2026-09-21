@@ -57,6 +57,33 @@ python network_scanner.py --no-vendor-lookup
 python network_scanner.py --refresh-vendor-db
 ```
 
+**IPv6 (`--ipv6`, Linux/macOS only):** everything above is IPv4-only —
+ARP and ping-sweep both assume a scannable subnet, which doesn't exist for
+IPv6 (a /64 has 2**64 addresses, versus 254 for an IPv4 /24). `--ipv6`
+instead sends a single ICMPv6 echo to the local link's all-nodes multicast
+address (`ff02::1`) on every network interface, then reads back whatever
+answered from the OS's own IPv6 neighbor cache — the same "ping first,
+then read the OS's cache" two-step `ping_sweep()` already uses for IPv4,
+just with multicast standing in for a brute-force sweep. Results are
+appended below the IPv4 table (grouped by address family, not
+numerically interleaved — comparing an IPv4 and IPv6 address for sorting
+purposes doesn't mean anything).
+
+```
+python network_scanner.py --ipv6
+python network_scanner.py --ipv6 --ipv6-timeout 5
+```
+
+Known limitations of this first pass:
+- **Windows isn't supported** — the neighbor-table command and its output
+  format differ enough from Linux/macOS that it isn't attempted; the flag
+  is safe to pass, it'll just find nothing there.
+- **No hostname resolution** for IPv6 devices — `mdns_reverse_lookup()`
+  builds an IPv4-style `in-addr.arpa` reverse name that doesn't apply to
+  IPv6 addresses (real IPv6 reverse DNS uses a different `ip6.arpa`
+  nibble format). MAC vendor lookup still works normally, since it
+  doesn't care which IP version found the MAC.
+
 ### `mobile_network_scanner.py`
 
 For sandboxed Python runtimes that can't spawn subprocesses or open raw
@@ -165,6 +192,13 @@ flag anything not in it with a leading `NEW` marker in the results table.
 (falling back to IP otherwise); `mobile_network_scanner.py` has no MAC to
 work with at all, so it always keys by IP — meaning a DHCP lease change
 there will make an existing device look "new" again.
+
+The registry also powers the inverse report: any previously-seen device
+that *didn't* show up in this scan (asleep, unplugged, out of Wi-Fi
+range) is listed separately below the table, e.g. "2 previously-seen
+device(s) not found in this scan." The registry itself is never pruned —
+a device just stops appearing in that list again once a later scan finds
+it.
 
 ```
 python network_scanner.py                      # NEW markers on by default

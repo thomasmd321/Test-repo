@@ -55,10 +55,21 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       `--watch` runs on an always-on machine, instead of terminal-only
       output.
 
-- [ ] **IPv6 neighbor discovery.** Most ISPs now do dual-stack, so an
+- [x] **IPv6 neighbor discovery.** Most ISPs now do dual-stack, so an
       IPv6-only device could go unseen by ARP/ping-based IPv4 scanning.
       Real scope increase: IPv6 uses ICMPv6 Neighbor Discovery (NDP)
       instead of ARP, and can't be brute-force enumerated like a /24
       the way IPv4 is - discovery instead means multicast-pinging the
       link-local all-nodes address (`ff02::1`) and reading back
       whatever answers land in the OS's neighbor cache.
+      Done: `--ipv6` flag on `network_scanner.py` only (needs
+      `subprocess`, which the iOS sandbox blocks anyway).
+      Scoped intentionally: Linux/macOS only (Windows's neighbor-table
+      command and format differ too much to be worth matching here),
+      and no hostname resolution for IPv6 addresses this round -
+      `mdns_reverse_lookup()` assumes IPv4-style `in-addr.arpa` reverse
+      names, which don't apply to IPv6's `ip6.arpa` format. MAC vendor
+      lookup works fine regardless, since it's IP-version-agnostic.
+      Also had to widen the results table's IP column (18 → 42 chars)
+      after testing showed a real IPv6 address running straight into
+      the MAC column with no separating space.

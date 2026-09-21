@@ -630,6 +630,123 @@ class TestPingSweep:
                 ns.ping_sweep("192.168.1.0/30", timeout=0.1, max_workers=4)
 
 
+class TestListScanInterfaces:
+    def test_excludes_loopback(self):
+        with patch("network_scanner.socket.if_nameindex", return_value=[(1, "lo"), (2, "eth0"), (3, "wlan0")]):
+            assert ns._list_scan_interfaces() == ["eth0", "wlan0"]
+
+    def test_returns_empty_list_when_unsupported(self):
+        with patch("network_scanner.socket.if_nameindex", side_effect=AttributeError):
+            assert ns._list_scan_interfaces() == []
+
+    def test_returns_empty_list_on_os_error(self):
+        with patch("network_scanner.socket.if_nameindex", side_effect=OSError):
+            assert ns._list_scan_interfaces() == []
+
+
+class TestPingIpv6Multicast:
+    def test_uses_ping6_when_available_on_unix(self):
+        with patch("network_scanner.platform.system", return_value="Linux"), \
+                patch("network_scanner.shutil.which", return_value="/sbin/ping6"), \
+                patch("network_scanner.subprocess.run") as mock_run:
+            ns._ping_ipv6_multicast("eth0", timeout=1.0)
+
+        command = mock_run.call_args[0][0]
+        assert command[0] == "ping6"
+        assert "-I" in command and "eth0" in command
+        assert "ff02::1" in command
+
+    def test_falls_back_to_plain_ping_when_ping6_missing(self):
+        with patch("network_scanner.platform.system", return_value="Linux"), \
+                patch("network_scanner.shutil.which", return_value=None), \
+                patch("network_scanner.subprocess.run") as mock_run:
+            ns._ping_ipv6_multicast("eth0", timeout=1.0)
+
+        assert mock_run.call_args[0][0][0] == "ping"
+
+    def test_uses_windows_syntax_on_windows(self):
+        with patch("network_scanner.platform.system", return_value="Windows"), \
+                patch("network_scanner.subprocess.run") as mock_run:
+            ns._ping_ipv6_multicast("eth0", timeout=1.0)
+
+        command = mock_run.call_args[0][0]
+        assert command[:2] == ["ping", "-6"]
+        assert "-I" not in command  # No interface scoping attempted on Windows.
+
+    def test_swallows_missing_binary_without_raising(self):
+        with patch("network_scanner.subprocess.run", side_effect=FileNotFoundError):
+            ns._ping_ipv6_multicast("eth0", timeout=1.0)  # Should not raise.
+
+    def test_swallows_timeout_without_raising(self):
+        with patch("network_scanner.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ping", timeout=1)):
+            ns._ping_ipv6_multicast("eth0", timeout=1.0)  # Should not raise.
+
+
+class TestReadIpv6NeighborTable:
+    def test_parses_linux_ip_neigh_output(self):
+        output = (
+            "fe80::1234:5678:9abc:def0 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
+            "2001:db8::1 dev eth0 lladdr 11:22:33:44:55:66 STALE\n"
+            "fe80::dead:beef dev eth0 FAILED\n"  # No lladdr - incomplete entry.
+        )
+        with patch("network_scanner.platform.system", return_value="Linux"), \
+                patch("network_scanner.subprocess.run", return_value=MagicMock(stdout=output)):
+            table = ns.read_ipv6_neighbor_table()
+
+        assert table == {
+            "fe80::1234:5678:9abc:def0": "aa:bb:cc:dd:ee:ff",
+            "2001:db8::1": "11:22:33:44:55:66",
+        }
+
+    def test_parses_macos_ndp_output_and_strips_zone_id(self):
+        output = (
+            "Neighbor                             Linklayer Address  Netif Expire    S Flags\n"
+            "fe80::1234:5678:9abc:def0%en0        aa:bb:cc:dd:ee:ff   en0   23h59m48s R\n"
+        )
+        with patch("network_scanner.platform.system", return_value="Darwin"), \
+                patch("network_scanner.subprocess.run", return_value=MagicMock(stdout=output)):
+            table = ns.read_ipv6_neighbor_table()
+
+        assert table == {"fe80::1234:5678:9abc:def0": "aa:bb:cc:dd:ee:ff"}
+
+    def test_returns_empty_dict_when_command_missing(self):
+        with patch("network_scanner.subprocess.run", side_effect=FileNotFoundError):
+            assert ns.read_ipv6_neighbor_table() == {}
+
+
+class TestIpv6NeighborScan:
+    def test_discovers_and_filters_multicast_and_loopback_entries(self):
+        neighbors = {
+            "fe80::1234:5678:9abc:def0": "aa:bb:cc:dd:ee:ff",
+            "2001:db8::1": "11:22:33:44:55:66",
+            "ff02::1": "33:33:00:00:00:01",  # Multicast - should be filtered.
+            "::1": "00:00:00:00:00:00",  # Loopback - should be filtered.
+        }
+        with patch("network_scanner._list_scan_interfaces", return_value=["eth0"]), \
+                patch("network_scanner._ping_ipv6_multicast"), \
+                patch("network_scanner.read_ipv6_neighbor_table", return_value=neighbors):
+            devices = ns.ipv6_neighbor_scan(timeout=1.0)
+
+        ips = {d["ip"] for d in devices}
+        assert ips == {"fe80::1234:5678:9abc:def0", "2001:db8::1"}
+        assert all(d["hostname"] == "" and d["vendor"] == "" for d in devices)
+
+    def test_pings_every_non_loopback_interface(self):
+        with patch("network_scanner._list_scan_interfaces", return_value=["eth0", "wlan0"]), \
+                patch("network_scanner._ping_ipv6_multicast") as mock_ping, \
+                patch("network_scanner.read_ipv6_neighbor_table", return_value={}):
+            ns.ipv6_neighbor_scan(timeout=1.0)
+
+        assert mock_ping.call_count == 2
+        pinged_interfaces = {call.args[0] for call in mock_ping.call_args_list}
+        assert pinged_interfaces == {"eth0", "wlan0"}
+
+    def test_returns_empty_list_when_nothing_found(self):
+        with patch("network_scanner._list_scan_interfaces", return_value=[]), \
+                patch("network_scanner.read_ipv6_neighbor_table", return_value={}):
+            assert ns.ipv6_neighbor_scan(timeout=1.0) == []
+
+
 class TestScan:
     def test_prefers_arp_scan_when_it_succeeds(self):
         expected = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff"}]
