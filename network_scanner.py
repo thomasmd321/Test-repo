@@ -1076,6 +1076,86 @@ def _find_port_changes(
     return changes
 
 
+_MAC_ADDRESS_PATTERN = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+
+def _is_mac_address(value: str) -> bool:
+    """Return True if value is formatted like a MAC address (aa:bb:cc:dd:ee:ff).
+
+    Used to tell a real MAC-based _device_identity() key apart from the
+    IP-fallback one ping-sweep-only devices get (see _device_identity()).
+    A plain "contains a colon" check isn't enough: an IPv6 address (also
+    tracked via this same registry - see ipv6_neighbor_scan()) contains
+    colons too, but in a variable-group, "::"-compressible format that
+    would never match this fixed six-group hex pattern.
+    """
+    return bool(_MAC_ADDRESS_PATTERN.match(value))
+
+
+def _find_ip_conflicts(
+    devices: List[Device], known_devices_path: Path = _KNOWN_DEVICES_PATH
+) -> Dict[str, str]:
+    """Flag devices whose current IP was last attributed to a different MAC.
+
+    Must run before _mark_new_devices() overwrites the registry, for the
+    same reason as _find_port_changes(): the "previous" MAC for this IP
+    would already be gone from the registry by the time this reads it.
+
+    This is a basic hygiene/spoofing signal, not a security audit: a
+    router handing a freed-up DHCP lease to a new device produces exactly
+    the same signal as something spoofing another device's IP (most
+    notably ARP-poisoning the gateway's own address) - both just mean
+    "the MAC now answering for this IP isn't the one that answered for it
+    last time." The former is the common case on an ordinary home
+    network; the latter is why this is worth surfacing at all rather than
+    staying silent. A conflict on your router/gateway's own IP is the one
+    case worth treating as urgent rather than routine.
+
+    Only compares devices that both have a real MAC address -
+    _device_identity() falls back to a bare IP for ping-sweep-only
+    devices with no MAC available at all (no scapy, or insufficient
+    privileges), and treating that IP-shaped fallback key as if it were a
+    MAC here would just surface the existing no-MAC limitation as noise,
+    not an actual IP handoff between two devices.
+
+    Args:
+        devices: This scan's results.
+        known_devices_path: Where the registry is stored between runs
+            (overridable for tests; production code should just use the
+            default).
+
+    Returns:
+        A dict mapping each conflicting device's MAC to the MAC that
+        previously held its current IP, per the registry. A device that
+        renews its own DHCP lease onto a new IP doesn't show up here -
+        _device_identity() already tracks it by MAC across that, so its
+        own registry entry simply updates to the new IP instead of
+        looking like a conflict against itself.
+    """
+    known = _load_known_devices(known_devices_path)
+
+    # Reverse index: last known IP -> MAC, built only from registry
+    # entries actually keyed by a MAC (see _is_mac_address()) - a
+    # ping-sweep-only entry's key is already just an IP, so it has
+    # nothing to conflict with.
+    ip_to_mac: Dict[str, str] = {
+        entry["ip"]: key
+        for key, entry in known.items()
+        if _is_mac_address(key) and "ip" in entry
+    }
+
+    conflicts: Dict[str, str] = {}
+    for device in devices:
+        mac = device.get("mac")
+        if not mac:
+            continue
+        previous_mac = ip_to_mac.get(device["ip"])
+        if previous_mac and previous_mac != mac:
+            conflicts[mac] = previous_mac
+
+    return conflicts
+
+
 def _find_missing_devices(devices: List[Device], known_devices_path: Path = _KNOWN_DEVICES_PATH) -> List[dict]:
     """Find registry entries for devices that didn't show up in this scan.
 
@@ -1776,6 +1856,7 @@ _ANSI_CODES: Dict[str, str] = {
     "green": "\033[32m",
     "red": "\033[31m",
     "yellow": "\033[33m",
+    "magenta": "\033[35m",
     "dim": "\033[2m",
     "reset": "\033[0m",
 }
@@ -1950,8 +2031,9 @@ def _build_notification_message(
     port_changes: Dict[str, Tuple[Optional[int], Optional[int]]],
     missing: List[dict],
     risky_devices: List[Device],
+    ip_conflicts: Dict[str, str],
 ) -> str:
-    """Build a plain-text summary of one scan's NEW/CHG/missing/risky findings.
+    """Build a plain-text summary of one scan's NEW/CHG/missing/risky/conflict findings.
 
     Same content as the results table's own summary sections, minus the
     ANSI color codes and table alignment a webhook receiver wouldn't
@@ -1959,7 +2041,7 @@ def _build_notification_message(
     loop, so it can be unit-tested without capturing stdout.
 
     Returns:
-        A multi-line summary, or "" if none of the four categories has
+        A multi-line summary, or "" if none of the five categories has
         anything in it - callers should treat that as "nothing to send".
     """
     def port_label(port: Optional[int]) -> str:
@@ -1996,6 +2078,14 @@ def _build_notification_message(
         for device in risky_devices:
             port_labels = ", ".join(f"{PORT_SERVICES.get(p, str(p))} ({p})" for p in device["risky_ports"])
             lines.append(f"  {device['ip']}  {port_labels}")
+        sections.append("\n".join(lines))
+
+    if ip_conflicts:
+        lines = [f"{len(ip_conflicts)} device(s) with a suspicious IP handoff:"]
+        for device in devices:
+            key = _device_identity(device)
+            if key in ip_conflicts:
+                lines.append(f"  {device['ip']}  now {key}, previously {ip_conflicts[key]}")
         sections.append("\n".join(lines))
 
     return "\n\n".join(sections)
@@ -2459,13 +2549,19 @@ def main() -> None:
         # instead of these calls silently keeping whatever path was
         # bound to the default argument at function-definition time.
         #
-        # _find_port_changes() must run before _mark_new_devices(): the
-        # latter overwrites the registry with this scan's port, so the
-        # "previous" value it needs would already be gone otherwise.
+        # _find_port_changes() and _find_ip_conflicts() must both run
+        # before _mark_new_devices(): the latter overwrites the registry
+        # with this scan's port/IP, so the "previous" values they need
+        # would already be gone otherwise.
         port_changes = (
             {}
             if args.no_track_devices
             else _find_port_changes(devices, known_devices_path=_KNOWN_DEVICES_PATH)
+        )
+        ip_conflicts = (
+            {}
+            if args.no_track_devices
+            else _find_ip_conflicts(devices, known_devices_path=_KNOWN_DEVICES_PATH)
         )
         is_new = {} if args.no_track_devices else _mark_new_devices(devices, known_devices_path=_KNOWN_DEVICES_PATH)
         missing = (
@@ -2475,10 +2571,10 @@ def main() -> None:
         )
         labels = {} if args.no_track_devices else _load_labels(_KNOWN_DEVICES_PATH)
         risky_devices = [d for d in devices if d.get("risky_ports")]
-        has_signal = bool(any(is_new.values()) or port_changes or missing or risky_devices)
+        has_signal = bool(any(is_new.values()) or port_changes or missing or risky_devices or ip_conflicts)
 
         if args.notify_webhook and has_signal:
-            message = _build_notification_message(devices, is_new, port_changes, missing, risky_devices)
+            message = _build_notification_message(devices, is_new, port_changes, missing, risky_devices, ip_conflicts)
             if message:
                 send_webhook_notification(args.notify_webhook, message)
 
@@ -2511,9 +2607,14 @@ def main() -> None:
             is_device_new = bool(is_new.get(key))
             if is_device_new:
                 new_count += 1
-            # A device can't be both: port_changes only contains devices
-            # already in the registry, while NEW means the opposite.
+            # A device can't be both NEW and CHG: port_changes only
+            # contains devices already in the registry, while NEW means
+            # the opposite. An IP conflict is different - it's about
+            # whether some *other* identity last held this IP, so a
+            # brand-new device can also be the one end of a conflict
+            # (e.g. a freshly-added device got handed a freed-up lease).
             has_port_change = key in port_changes
+            is_conflict = key in ip_conflicts
             if is_device_new:
                 marker = "NEW  "
             elif has_port_change:
@@ -2532,11 +2633,13 @@ def main() -> None:
             # nesting an inner colorize() inside an outer one would have
             # the inner reset kill the outer color partway through the
             # line. Priority (most to least important signal): risky,
-            # then new, then a changed port - a NEW+risky device is still
-            # visibly NEW from the literal marker text, just not also
-            # green.
+            # then an IP conflict, then new, then a changed port - a
+            # NEW+conflict device is still visibly NEW from the literal
+            # marker text, just not also green.
             if device.get("risky_ports"):
                 row = _colorize(row, "red", color)
+            elif is_conflict:
+                row = _colorize(row, "magenta", color)
             elif is_device_new:
                 row = _colorize(row, "green", color)
             elif has_port_change:
@@ -2573,6 +2676,21 @@ def main() -> None:
                 previous_port, current_port = port_changes[key]
                 line = f"  {device['ip']:<20} {_port_label(previous_port)} -> {_port_label(current_port)}"
                 print(_colorize(line, "yellow", color))
+
+        if ip_conflicts:
+            print(_colorize(
+                f"\n⚠ {len(ip_conflicts)} device(s) with a suspicious IP handoff:", "magenta", color
+            ))
+            for device in devices:
+                key = _device_identity(device)
+                if key not in ip_conflicts:
+                    continue
+                line = f"  {device['ip']:<20} now {key}, previously {ip_conflicts[key]}"
+                print(_colorize(line, "magenta", color))
+            print(
+                "\nA DHCP lease reassignment is the common, harmless cause; a conflict on\n"
+                "your router/gateway's own IP is the one worth treating as urgent."
+            )
 
         if risky_devices:
             print(_colorize(f"\n⚠ {len(risky_devices)} device(s) exposing commonly-risky ports:", "yellow", color))

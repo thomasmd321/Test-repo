@@ -383,6 +383,7 @@ def build_pdf(desktop_diagram: Path, mobile_diagram: Path, terminal_mockup: Path
         crow("Banner grabbing", "--identify IP deep dive", "Built into every scan"),
         crow("Risky-port flagging", "Yes", "Yes"),
         crow("NEW / CHG / missing tracking", "Yes", "Yes"),
+        crow("IP-conflict / spoofing alert", "Yes", "No (no MAC available)"),
         crow("Export results", "--output FILE (CSV/JSON)", "--output FILE (CSV/JSON)"),
         crow("Scan history log", "--log-history FILE", "--log-history FILE"),
         crow("Excluding hosts", "--exclude IP/CIDR", "--exclude IP/CIDR"),
@@ -578,6 +579,8 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
          "A known device is answering on a different port than last time."],
         [Paragraph("<font color='#c23b32'><b>red row</b></font>", styles["FlagDesc"]),
          "Device exposes a port on the risky-ports list (telnet, SMB, RDP, VNC, FTP)."],
+        [Paragraph("<font color='#9c3fa3'><b>magenta row</b></font>", styles["FlagDesc"]),
+         "This IP was last attributed to a different MAC address (network_scanner.py only)."],
         [Paragraph("dim gray line", styles["FlagDesc"]), "A previously-seen device that didn't show up in this scan."],
     ]
     lt = Table(legend_data, colWidths=[1.8 * inch, 4.7 * inch])
@@ -593,8 +596,10 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
     story.append(Spacer(1, 0.1 * inch))
     story.append(Paragraph(
         "A device can be NEW or CHG, never both — a device with no prior registry entry can't "
-        "have a “changed” port, only a first one. Risky-row coloring takes priority over "
-        "both if a device qualifies for more than one.", styles["BodySmall"]))
+        "have a “changed” port, only a first one. A device can be NEW <i>and</i> a magenta IP "
+        "conflict at once, though (a freshly-added device can land on an IP someone else just "
+        "gave up) — row-color priority, most to least urgent: risky, conflict, new, changed port.",
+        styles["BodySmall"]))
 
     story.append(Paragraph("Resetting tracking", styles["H2"]))
     story.append(code_block("""python3 network_scanner.py --no-track-devices      # skip tracking this run
@@ -617,6 +622,26 @@ python3 network_scanner.py --remove-label aa:bb:cc:dd:ee:ff"""),
             "runs in the same command. A device doesn't need to already be in the registry — "
             "labeling one creates a minimal entry for it, though that also means it won't show as "
             "NEW the next time it's actually scanned.", styles["BodySmall"]),
+    ]))
+
+    story.append(Spacer(1, 0.1 * inch))
+
+    story.append(KeepTogether([
+        Paragraph("IP-conflict / spoofing alerts (network_scanner.py only)", styles["H2"]),
+        Paragraph(
+            "The same registry also catches a device's IP being taken over by a different MAC "
+            "address than last time — a DHCP lease getting handed to a new device is the ordinary "
+            "cause, but it's exactly the same signal something spoofing another device's IP (most "
+            "notably ARP-poisoning your router's own address) would produce. A conflicting device "
+            "prints in magenta and shows up in its own summary section.", styles["Body"]),
+        Paragraph(
+            "This is a hygiene signal, not an intrusion-detection system — most hits will be "
+            "completely benign lease reassignments. A conflict on your router/gateway's own IP is "
+            "the one case worth treating as urgent rather than routine. Only compares devices that "
+            "both have a real MAC address, so a ping-sweep-only device (no MAC at all) can't "
+            "trigger or be flagged by this. Not available on mobile_network_scanner.py, which has "
+            "no MAC address to compare in the first place. Skipped entirely with "
+            "<font face='Courier'>--no-track-devices</font>.", styles["BodySmall"]),
     ]))
 
     story.append(PageBreak())

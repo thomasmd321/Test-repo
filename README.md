@@ -330,6 +330,31 @@ The very first run (or right after `--forget-known-devices`) will mark
 every device `NEW`, since nothing has been seen before yet — that's
 expected, not a bug.
 
+## IP-conflict / spoofing alerts (`network_scanner.py` only)
+
+The same registry also catches a device's IP being taken over by a
+*different* MAC address than last time — a DHCP lease getting handed to
+a new device is the ordinary cause, but it's exactly the same signal
+something spoofing another device's IP (most notably ARP-poisoning your
+router's own address) would produce. A conflicting device prints in
+magenta and shows up in a summary section, e.g.:
+
+```
+⚠ 1 device(s) with a suspicious IP handoff:
+  192.168.1.50         now bb:bb:bb:bb:bb:bb, previously aa:aa:aa:aa:aa:aa
+```
+
+This is a hygiene signal, not an intrusion-detection system — a home
+network reassigns leases all the time, and most hits here will be
+completely benign. A conflict on your router/gateway's own IP is the one
+case worth treating as urgent rather than routine. Only compares devices
+that both have a real MAC address; a ping-sweep-only device (no MAC at
+all — see above) can't meaningfully conflict with anything, so it's
+excluded rather than adding noise from the existing no-MAC limitation.
+Not available on `mobile_network_scanner.py`, which has no MAC address to
+compare in the first place (see the tracking note above). Skipped
+entirely with `--no-track-devices`, same as `NEW`/`CHG`/missing tracking.
+
 ## Custom device labels/aliases
 
 Assign a friendly name to a device — useful when its real hostname is

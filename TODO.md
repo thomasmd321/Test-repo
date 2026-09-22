@@ -160,6 +160,59 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       documented tradeoff against the extra dependency `argcomplete`
       would add.
 
+- [x] **IP-conflict / spoofing alert.** Flag when the same IP shows a
+      different MAC across scans than what the known-devices registry
+      last recorded - a real class of network issue (a DHCP lease
+      reassignment, or something spoofing another device's IP - most
+      notably the gateway's own address) that today produces no signal
+      at all, even though the registry already has everything needed to
+      detect it.
+      Done (`network_scanner.py` only - `mobile_network_scanner.py` has
+      no MAC to compare against at all, see its own `_device_identity()`
+      docstring): `_is_mac_address()` + `_find_ip_conflicts()`, run
+      before `_mark_new_devices()` overwrites the registry, the same
+      ordering `_find_port_changes()` already needs and for the same
+      reason. Builds a reverse IP->MAC index from the registry, restricted
+      to entries actually keyed by a real MAC (`_is_mac_address()`, an
+      exact six-group hex-colon match - a plain "contains a colon" check
+      would misfire on an IPv6 fallback identity, which also contains
+      colons but in a different format) so a ping-sweep-only device's
+      IP-shaped identity never gets treated as a conflicting MAC. Flagged
+      devices get a magenta row (`_ANSI_CODES["magenta"]`, new) and a
+      summary section explaining the finding, wired into
+      `_build_notification_message()` and `--quiet`'s signal check
+      alongside NEW/CHG/missing/risky. Deliberately framed as a hygiene
+      signal, not an intrusion-detection system: a home router handing a
+      freed-up lease to a new device produces the exact same signal as
+      real spoofing, so the summary text calls out the gateway's own IP
+      specifically as the one case worth treating as urgent. Verified
+      against the real (unmocked) registry read/write path end-to-end
+      through `main()` itself: seeded the registry with one real
+      `_mark_new_devices()` call, then ran the actual CLI with
+      `scan_all_subnets()` faked to return a second MAC at the same IP -
+      confirmed the NEW marker, the missing-device report, and the new
+      IP-handoff section all fired correctly together, that a repeat scan
+      of an unchanged device produces zero false positives, and that
+      `--quiet` stays fully silent on that unchanged rescan.
+
+- [ ] **`--diff-only` watch mode.** Instead of reprinting the full results
+      table on every `--watch` tick, print just what changed since the
+      previous tick - reusing `scan_diff.py`'s comparison logic against
+      the last entry in the scan history log (see "Scan history log"
+      above) rather than the full table every time. Complements `--quiet`
+      (which suppresses a *boring* tick entirely) by making an
+      *interesting* tick's output shorter too.
+
+- [ ] **Config file / profiles.** With 20+ flags per script now, a saved
+      profile (e.g. `--profile home`, reading from
+      `~/.network_scanner.toml` or similar) would beat retyping a long
+      `--exclude ... --ports ... --log-history ...` combination every
+      time. CLI flags should still override whatever the profile sets, so
+      a one-off scan doesn't require editing the file first. Needs care
+      to keep argparse's own defaults/help text as the single source of
+      truth for what's configurable, rather than drifting out of sync
+      with a second, separately-maintained schema.
+
 - [x] **Scan-diff tool.** A natural complement to CSV/JSON export above:
       compare two saved scans and report what changed between them
       (devices added/removed, per-field changes on ones present in

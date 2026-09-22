@@ -504,14 +504,14 @@ class TestAppendScanHistory:
 
 class TestBuildNotificationMessage:
     def test_returns_empty_string_when_nothing_to_report(self):
-        message = ns._build_notification_message([], {}, {}, [], [])
+        message = ns._build_notification_message([], {}, {}, [], [], {})
         assert message == ""
 
     def test_includes_new_devices(self):
         devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "phone.local"}]
         is_new = {"aa:bb:cc:dd:ee:ff": True}
 
-        message = ns._build_notification_message(devices, is_new, {}, [], [])
+        message = ns._build_notification_message(devices, is_new, {}, [], [], {})
 
         assert "1 new device(s):" in message
         assert "192.168.1.1  phone.local" in message
@@ -520,7 +520,7 @@ class TestBuildNotificationMessage:
         devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}]
         is_new = {"aa:bb:cc:dd:ee:ff": True}
 
-        message = ns._build_notification_message(devices, is_new, {}, [], [])
+        message = ns._build_notification_message(devices, is_new, {}, [], [], {})
 
         assert "(no hostname)" in message
 
@@ -528,7 +528,7 @@ class TestBuildNotificationMessage:
         devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}]
         port_changes = {"aa:bb:cc:dd:ee:ff": (80, 23)}
 
-        message = ns._build_notification_message(devices, {}, port_changes, [], [])
+        message = ns._build_notification_message(devices, {}, port_changes, [], [], {})
 
         assert "1 device(s) with a changed port:" in message
         assert "http (80) -> telnet (23)" in message
@@ -536,7 +536,7 @@ class TestBuildNotificationMessage:
     def test_includes_missing_devices(self):
         missing = [{"key": "aa:bb:cc:dd:ee:ff", "hostname": "router.local"}]
 
-        message = ns._build_notification_message([], {}, {}, missing, [])
+        message = ns._build_notification_message([], {}, {}, missing, [], {})
 
         assert "1 previously-seen device(s) missing:" in message
         assert "aa:bb:cc:dd:ee:ff (router.local)" in message
@@ -544,7 +544,7 @@ class TestBuildNotificationMessage:
     def test_missing_device_label_takes_priority_over_hostname(self):
         missing = [{"key": "aa:bb:cc:dd:ee:ff", "hostname": "router.local", "label": "Kitchen Echo"}]
 
-        message = ns._build_notification_message([], {}, {}, missing, [])
+        message = ns._build_notification_message([], {}, {}, missing, [], {})
 
         assert "(Kitchen Echo)" in message
         assert "router.local" not in message
@@ -552,17 +552,26 @@ class TestBuildNotificationMessage:
     def test_includes_risky_devices(self):
         risky = [{"ip": "192.168.1.1", "risky_ports": [23, 445]}]
 
-        message = ns._build_notification_message([], {}, {}, [], risky)
+        message = ns._build_notification_message([], {}, {}, [], risky, {})
 
         assert "1 device(s) exposing a risky port:" in message
         assert "telnet (23), smb (445)" in message
+
+    def test_includes_ip_conflicts(self):
+        devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}]
+        ip_conflicts = {"aa:bb:cc:dd:ee:ff": "11:22:33:44:55:66"}
+
+        message = ns._build_notification_message(devices, {}, {}, [], [], ip_conflicts)
+
+        assert "1 device(s) with a suspicious IP handoff:" in message
+        assert "192.168.1.1  now aa:bb:cc:dd:ee:ff, previously 11:22:33:44:55:66" in message
 
     def test_combines_multiple_categories_with_blank_line_between(self):
         devices = [{"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "phone.local"}]
         is_new = {"aa:bb:cc:dd:ee:ff": True}
         risky = [{"ip": "192.168.1.2", "risky_ports": [23]}]
 
-        message = ns._build_notification_message(devices, is_new, {}, [], risky)
+        message = ns._build_notification_message(devices, is_new, {}, [], risky, {})
 
         assert "1 new device(s):" in message
         assert "1 device(s) exposing a risky port:" in message
@@ -1694,6 +1703,86 @@ class TestFindPortChanges:
         changes = ns._find_port_changes([now_open_device], known_devices_path=path)
 
         assert changes == {"aa:bb:cc:dd:ee:ff": (None, 80)}
+
+
+class TestIsMacAddress:
+    def test_accepts_lowercase_mac(self):
+        assert ns._is_mac_address("aa:bb:cc:dd:ee:ff") is True
+
+    def test_accepts_uppercase_and_mixed_case_mac(self):
+        assert ns._is_mac_address("AA:BB:CC:DD:EE:FF") is True
+        assert ns._is_mac_address("Aa:Bb:Cc:Dd:Ee:Ff") is True
+
+    def test_rejects_ipv4_address(self):
+        assert ns._is_mac_address("192.168.1.1") is False
+
+    def test_rejects_ipv6_address(self):
+        # The real motivating case: an IPv6 address also contains colons,
+        # but in a variable-group, "::"-compressible format that must not
+        # be mistaken for a six-group MAC.
+        assert ns._is_mac_address("fe80::1") is False
+        assert ns._is_mac_address("2001:db8::ff00:42:8329") is False
+
+    def test_rejects_mac_with_dashes(self):
+        assert ns._is_mac_address("aa-bb-cc-dd-ee-ff") is False
+
+    def test_rejects_empty_string(self):
+        assert ns._is_mac_address("") is False
+
+
+class TestFindIpConflicts:
+    def test_reports_ip_previously_attributed_to_a_different_mac(self, tmp_path):
+        path = tmp_path / "known.json"
+        original = {"ip": "192.168.1.50", "mac": "aa:aa:aa:aa:aa:aa", "hostname": "", "vendor": ""}
+        ns._mark_new_devices([original], known_devices_path=path)
+
+        newcomer = {"ip": "192.168.1.50", "mac": "bb:bb:bb:bb:bb:bb", "hostname": "", "vendor": ""}
+        conflicts = ns._find_ip_conflicts([newcomer], known_devices_path=path)
+
+        assert conflicts == {"bb:bb:bb:bb:bb:bb": "aa:aa:aa:aa:aa:aa"}
+
+    def test_no_conflict_when_the_same_device_keeps_its_ip(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.50", "mac": "aa:aa:aa:aa:aa:aa", "hostname": "", "vendor": ""}
+        ns._mark_new_devices([device], known_devices_path=path)
+
+        assert ns._find_ip_conflicts([device], known_devices_path=path) == {}
+
+    def test_no_conflict_when_a_device_renews_its_own_lease_onto_a_new_ip(self, tmp_path):
+        # A device moving to a fresh IP nobody else has ever held isn't a
+        # conflict - this is the ordinary DHCP-renewal case
+        # _device_identity() already handles by tracking MAC, not IP.
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.50", "mac": "aa:aa:aa:aa:aa:aa", "hostname": "", "vendor": ""}
+        ns._mark_new_devices([device], known_devices_path=path)
+
+        moved = dict(device, ip="192.168.1.60")
+        assert ns._find_ip_conflicts([moved], known_devices_path=path) == {}
+
+    def test_ignores_a_previous_ip_only_fallback_identity(self, tmp_path):
+        # The registry's previous holder of this IP had no MAC at all
+        # (ping-sweep fallback, identity = its bare IP) - not a real MAC
+        # to conflict with, just the pre-existing no-MAC limitation.
+        path = tmp_path / "known.json"
+        no_mac_device = {"ip": "192.168.1.50", "mac": "", "hostname": "", "vendor": ""}
+        ns._mark_new_devices([no_mac_device], known_devices_path=path)
+
+        newcomer = {"ip": "192.168.1.50", "mac": "bb:bb:bb:bb:bb:bb", "hostname": "", "vendor": ""}
+        assert ns._find_ip_conflicts([newcomer], known_devices_path=path) == {}
+
+    def test_ignores_a_current_device_with_no_mac(self, tmp_path):
+        path = tmp_path / "known.json"
+        original = {"ip": "192.168.1.50", "mac": "aa:aa:aa:aa:aa:aa", "hostname": "", "vendor": ""}
+        ns._mark_new_devices([original], known_devices_path=path)
+
+        no_mac_newcomer = {"ip": "192.168.1.50", "mac": "", "hostname": "", "vendor": ""}
+        assert ns._find_ip_conflicts([no_mac_newcomer], known_devices_path=path) == {}
+
+    def test_empty_registry_reports_no_conflicts(self, tmp_path):
+        path = tmp_path / "known.json"
+        device = {"ip": "192.168.1.50", "mac": "aa:aa:aa:aa:aa:aa", "hostname": "", "vendor": ""}
+
+        assert ns._find_ip_conflicts([device], known_devices_path=path) == {}
 
 
 class TestFindMissingDevices:
