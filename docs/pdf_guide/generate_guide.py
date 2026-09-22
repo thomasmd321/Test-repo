@@ -384,6 +384,7 @@ def build_pdf(desktop_diagram: Path, mobile_diagram: Path, terminal_mockup: Path
         crow("Risky-port flagging", "Yes", "Yes"),
         crow("NEW / CHG / missing tracking", "Yes", "Yes"),
         crow("IP-conflict / spoofing alert", "Yes", "No (no MAC available)"),
+        crow("Retry a flaky scan", "--retries N", "--retries N"),
         crow("Export results", "--output FILE (CSV/JSON)", "--output FILE (CSV/JSON)"),
         crow("Scan history log", "--log-history FILE", "--log-history FILE"),
         crow("Excluding hosts", "--exclude IP/CIDR", "--exclude IP/CIDR"),
@@ -469,6 +470,7 @@ python3 network_scanner.py --output scan.json  # save results to a file"""))
         ("--identify IP", "Skip the network scan; do a slow, thorough single-host investigation instead (more ports, banner grabs, full hostname/vendor resolution)."),
         ("--doctor", "Skip the network scan; check this environment for everything this script can use (scapy, ping/arp, cache writability, mDNS, etc.) and report it."),
         ("--timeout SECONDS", "Timeout per host (default: 1.0)."),
+        ("--retries N", "Extra ARP/ping-sweep passes beyond the first, to recover a device that missed one reply due to transient packet loss (default: 0)."),
         ("--mdns-timeout SECONDS", "Timeout for the mDNS/DNS-SD hostname fallback (default: 0.3)."),
         ("--no-vendor-lookup", "Skip the IEEE OUI vendor lookup (avoids the first-run registry download)."),
         ("--refresh-vendor-db", "Force a fresh OUI registry download instead of using the cached copy."),
@@ -519,6 +521,7 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
         ("subnet", "Positional. CIDR range(s) to scan, comma-separated for more than one. Auto-detected if omitted."),
         ("--doctor", "Skip the network scan; check this environment for everything this script can use (subnet detection, TCP connectivity, cache writability, mDNS) and report it."),
         ("--timeout SECONDS", "Timeout per port probe (default: 0.5); also used for the banner-grab and risky-ports steps."),
+        ("--retries N", "Extra probe passes for hosts that didn't answer, to recover a device that missed one connection attempt (default: 0)."),
         ("--ports LIST", "Comma-separated TCP ports to probe instead of the built-in default list."),
         ("--exclude LIST", "Comma-separated IPs and/or CIDR ranges to drop before probing anything (a bare IP is treated as a /32)."),
         ("--mdns-timeout SECONDS", "Timeout for the mDNS/Bonjour hostname fallback (default: 0.3)."),
@@ -605,6 +608,27 @@ python3 mobile_network_scanner.py --output scan.csv  # save results to a file"""
     story.append(code_block("""python3 network_scanner.py --no-track-devices      # skip tracking this run
 python3 network_scanner.py --forget-known-devices  # reset registry, all NEW
 python3 mobile_network_scanner.py --watch 300      # standing monitor on phone"""))
+
+    story.append(Spacer(1, 0.1 * inch))
+
+    story.append(KeepTogether([
+        Paragraph("Recovering from a flaky scan (--retries)", styles["H2"]),
+        Paragraph(
+            "A single dropped ARP/ping reply (or one flaky TCP connect on the mobile script) can "
+            "make a live device look “missing” this run and “NEW” again next run - a false signal "
+            "every registry-based feature above inherits. --retries N re-probes before finalizing "
+            "results, giving a flaky device another chance to answer.", styles["Body"]),
+        code_block("""python3 network_scanner.py --retries 1
+python3 mobile_network_scanner.py --retries 2"""),
+        Paragraph(
+            "The two scripts implement this differently, matching how each discovers devices: "
+            "network_scanner.py's ARP/ping sweep is one broadcast across the whole subnet, so each "
+            "retry re-runs that same broadcast (scapy's raw sockets aren't necessarily safe to hit "
+            "concurrently from targeted single-host requests instead). mobile_network_scanner.py "
+            "already probes each host individually over plain TCP, so each retry there only "
+            "re-probes the specific hosts still missing a match. Both default to 0 (a single pass), "
+            "preserving the original behavior exactly.", styles["BodySmall"]),
+    ]))
 
     story.append(KeepTogether([
         Paragraph("Custom device labels", styles["H2"]),

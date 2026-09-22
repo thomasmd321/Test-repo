@@ -761,6 +761,7 @@ def tcp_scan(
     grab_banners: bool = True,
     check_risky_ports: bool = True,
     excluded_networks: Sequence["ipaddress._BaseNetwork"] = (),
+    retries: int = 0,
 ) -> List[Device]:
     """Discover devices by probing common TCP ports across every host in subnet.
 
@@ -795,6 +796,16 @@ def tcp_scan(
             no TCP connection is ever attempted against them, unlike
             network_scanner.py's ARP-broadcast case, since this script
             already probes each host individually.
+        retries: Extra probe passes for hosts that didn't answer on any
+            earlier pass, to recover a device that missed one connection
+            attempt due to transient Wi-Fi/network flakiness rather than
+            actually being offline. Unlike network_scanner.py's scan()
+            (which re-broadcasts to the whole subnet, since ARP has no
+            per-host equivalent), each retry here only re-probes the
+            hosts still missing a match - already-found hosts aren't
+            re-probed, since this script talks to each host individually
+            rather than in one subnet-wide broadcast. 0 (the default)
+            preserves the original single-pass behavior exactly.
 
     Returns:
         Discovered devices sorted by IP address, each with "hostname"
@@ -829,6 +840,22 @@ def tcp_scan(
             port = future.result()
             if port is not None:
                 matched_ports[str(ip)] = port
+
+    # Only re-probes hosts still missing a match, not everyone again -
+    # each pass here is an independent TCP connect per host rather than
+    # one subnet-wide broadcast, so there's no reason to pay the timeout
+    # twice for a host that already answered.
+    for _ in range(retries):
+        still_missing = [ip for ip in hosts if str(ip) not in matched_ports]
+        if not still_missing:
+            break
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(probe_host, str(ip), ports, timeout): ip for ip in still_missing}
+            for future in as_completed(futures):
+                ip = futures[future]
+                port = future.result()
+                if port is not None:
+                    matched_ports[str(ip)] = port
 
     # Chromecasts (and other Google Cast devices) generally don't answer
     # mdns_reverse_lookup()'s reverse-PTR question - that's an optional
@@ -918,6 +945,7 @@ def scan_all_subnets(
     grab_banners: bool = True,
     check_risky_ports: bool = True,
     excluded_networks: Sequence["ipaddress._BaseNetwork"] = (),
+    retries: int = 0,
 ) -> List[Device]:
     """Run tcp_scan() over multiple subnets and merge the results into one list.
 
@@ -930,6 +958,7 @@ def scan_all_subnets(
         grab_banners: Passed through to tcp_scan() for each subnet.
         check_risky_ports: Passed through to tcp_scan() for each subnet.
         excluded_networks: Passed through to tcp_scan() for each subnet.
+        retries: Passed through to tcp_scan() for each subnet.
 
     Returns:
         Every discovered device across all subnets, sorted by IP and
@@ -949,6 +978,7 @@ def scan_all_subnets(
             grab_banners=grab_banners,
             check_risky_ports=check_risky_ports,
             excluded_networks=excluded_networks,
+            retries=retries,
         ):
             devices_by_ip[device["ip"]] = device
 
@@ -1580,6 +1610,12 @@ def main() -> None:
         help="Subnet(s) to scan in CIDR notation, comma-separated for more than one, e.g. 192.168.1.0/24,10.0.0.0/24",
     )
     parser.add_argument("--timeout", type=float, default=0.5, help="Timeout in seconds per port probe (default: 0.5)")
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=0,
+        help="Extra probe passes for hosts that didn't answer, to recover a device that missed one connection attempt due to transient flakiness (default: 0, i.e. a single pass) - see tcp_scan()",
+    )
     parser.add_argument("--ports", type=str, default=None, help="Comma-separated TCP ports to probe (default: common ports)")
     parser.add_argument(
         "--exclude",
@@ -1724,6 +1760,7 @@ def main() -> None:
             grab_banners=not args.no_banners,
             check_risky_ports=not args.no_risky_ports,
             excluded_networks=excluded_networks,
+            retries=args.retries,
         )
 
         if args.log_history:

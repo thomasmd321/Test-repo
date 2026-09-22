@@ -330,6 +330,33 @@ The very first run (or right after `--forget-known-devices`) will mark
 every device `NEW`, since nothing has been seen before yet — that's
 expected, not a bug.
 
+## Recovering from a flaky scan (`--retries`)
+
+A single dropped ARP/ping reply (or one flaky TCP connect on the mobile
+script) can make a device that's genuinely still there look "missing"
+this run — and then "NEW" again next run once it answers normally. That
+false signal pollutes every registry-based feature above: NEW/CHG
+markers, the missing-device report, IP-conflict alerts, and webhook
+notifications all inherit it. `--retries N` re-probes before finalizing
+results, giving a flaky device another chance to answer:
+
+```
+python network_scanner.py --retries 1
+python mobile_network_scanner.py --retries 2
+```
+
+The two scripts implement this differently, matching how each one
+discovers devices in the first place. `network_scanner.py`'s ARP/ping
+sweep is one broadcast across the whole subnet, so each retry re-runs
+that same broadcast and merges in anything new that answers — scapy's
+raw sockets aren't necessarily safe to hit concurrently from several
+targeted single-host requests instead, so a second full broadcast is the
+simple, safe option even though it's less targeted.
+`mobile_network_scanner.py` already probes each host individually over
+plain TCP, so each retry there only re-probes the specific hosts still
+missing a match, leaving already-found devices alone. Defaults to `0`
+(a single pass) on both scripts, preserving the original behavior exactly.
+
 ## IP-conflict / spoofing alerts (`network_scanner.py` only)
 
 The same registry also catches a device's IP being taken over by a

@@ -829,6 +829,56 @@ class TestTcpScan:
         assert "192.168.1.1" not in [d["ip"] for d in devices]
         assert "192.168.1.2" not in [d["ip"] for d in devices]
 
+    def test_zero_retries_probes_each_host_only_once(self):
+        probe_calls = []
+
+        def fake_probe(ip, ports, timeout):
+            probe_calls.append(ip)
+            return None
+
+        with patch("mobile_network_scanner.probe_host", side_effect=fake_probe), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]):
+            ms.tcp_scan("192.168.1.0/29", timeout=0.1, max_workers=8)
+
+        assert len(probe_calls) == len(set(probe_calls))
+
+    def test_retries_recovers_a_host_that_missed_the_first_pass(self):
+        call_counts: dict = {}
+
+        def fake_probe(ip, ports, timeout):
+            call_counts[ip] = call_counts.get(ip, 0) + 1
+            if ip == "192.168.1.5":
+                # Missed on the first pass, answers from the first retry on.
+                return None if call_counts[ip] == 1 else 80
+            return None
+
+        with patch("mobile_network_scanner.probe_host", side_effect=fake_probe), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
+                patch("mobile_network_scanner._resolve_hostname", return_value=""):
+            devices = ms.tcp_scan("192.168.1.0/29", timeout=0.1, max_workers=8, retries=1)
+
+        assert "192.168.1.5" in [d["ip"] for d in devices]
+        assert call_counts["192.168.1.5"] == 2
+
+    def test_retries_do_not_reprobe_hosts_that_already_answered(self):
+        probe_calls = []
+
+        def fake_probe(ip, ports, timeout):
+            probe_calls.append(ip)
+            return 80  # Every host answers on the very first pass.
+
+        with patch("mobile_network_scanner.probe_host", side_effect=fake_probe), \
+                patch("mobile_network_scanner.grab_banner", return_value=""), \
+                patch("mobile_network_scanner._find_risky_ports", return_value=[]), \
+                patch("mobile_network_scanner._resolve_hostname", return_value=""):
+            ms.tcp_scan("192.168.1.0/29", timeout=0.1, max_workers=8, retries=3)
+
+        # None of the 3 retry passes should probe anyone again, since
+        # every host already has a match after the first pass.
+        assert len(probe_calls) == len(set(probe_calls))
+
     def test_attaches_hostname_and_matched_port_when_available(self):
         # Port 80, not 8009 (the Chromecast port), so this doesn't also
         # trigger the Cast-service-discovery path - see TestTcpScan's
@@ -969,7 +1019,7 @@ class TestTcpScan:
 
 class TestScanAllSubnets:
     def test_merges_devices_from_every_subnet(self):
-        def fake_tcp_scan(subnet, timeout, ports, max_workers, mdns_timeout, grab_banners, check_risky_ports, excluded_networks):
+        def fake_tcp_scan(subnet, timeout, ports, max_workers, mdns_timeout, grab_banners, check_risky_ports, excluded_networks, retries):
             return {
                 "192.168.1.0/24": [
                     {"ip": "192.168.1.5", "hostname": "", "port": 80, "banner": "", "risky_ports": []}

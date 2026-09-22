@@ -96,7 +96,7 @@ class TestScanAllSubnets:
         )
 
     def test_merges_devices_from_every_subnet(self):
-        def fake_scan(subnet, timeout):
+        def fake_scan(subnet, timeout, retries=0):
             return {
                 "192.168.1.0/24": [{"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}],
                 "10.0.0.0/24": [{"ip": "10.0.0.9", "mac": "", "hostname": "nas.local"}],
@@ -145,7 +145,7 @@ class TestScanAllSubnets:
             "10.0.0.0/24": [{"ip": "10.0.0.9", "mac": "", "hostname": ""}],
         }
 
-        def fake_scan(subnet, timeout):
+        def fake_scan(subnet, timeout, retries=0):
             return devices_by_subnet[subnet]
 
         def fake_resolve(devices, mdns_timeout):
@@ -259,7 +259,7 @@ class TestScanAllSubnets:
         under real concurrent ARP scans (see this function's docstring)."""
         subnets = ["10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
 
-        def fake_scan(subnet, timeout):
+        def fake_scan(subnet, timeout, retries=0):
             time.sleep(0.2)
             last_octet = subnet.split(".")[2]
             return [{"ip": f"10.0.{last_octet}.5", "mac": "", "hostname": ""}]
@@ -280,7 +280,7 @@ class TestScanAllSubnets:
         out at the ThreadPoolExecutor's own default."""
         subnets = ["10.0.0.0/24", "10.0.1.0/24", "10.0.2.0/24"]
 
-        def fake_scan(subnet, timeout):
+        def fake_scan(subnet, timeout, retries=0):
             time.sleep(0.15)
             return []
 
@@ -1563,6 +1563,54 @@ class TestScan:
         with patch("network_scanner.arp_scan", side_effect=ValueError("boom")):
             with pytest.raises(ValueError):
                 ns.scan("192.168.1.0/24", timeout=1.0)
+
+    def test_zero_retries_calls_the_method_only_once(self):
+        with patch("network_scanner.arp_scan", return_value=[]) as mock_arp:
+            ns.scan("192.168.1.0/24", timeout=1.0)
+
+        assert mock_arp.call_count == 1
+
+    def test_merges_a_device_that_only_answers_on_a_retry_pass(self):
+        missed_then_found = [
+            [],
+            [{"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}],
+        ]
+        with patch("network_scanner.arp_scan", side_effect=missed_then_found) as mock_arp:
+            result = ns.scan("192.168.1.0/24", timeout=1.0, retries=1)
+
+        assert mock_arp.call_count == 2
+        assert [d["ip"] for d in result] == ["192.168.1.5"]
+
+    def test_does_not_duplicate_a_device_seen_on_every_pass(self):
+        device = {"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": ""}
+        with patch("network_scanner.arp_scan", return_value=[device]) as mock_arp:
+            result = ns.scan("192.168.1.0/24", timeout=1.0, retries=2)
+
+        assert mock_arp.call_count == 3  # 1 initial pass + 2 retries.
+        assert [d["ip"] for d in result] == ["192.168.1.5"]
+
+    def test_retries_reuse_arp_scan_never_falling_over_to_ping_sweep(self):
+        with patch("network_scanner.arp_scan", return_value=[]) as mock_arp, \
+                patch("network_scanner.ping_sweep") as mock_sweep:
+            ns.scan("192.168.1.0/24", timeout=1.0, retries=2)
+
+        assert mock_arp.call_count == 3
+        mock_sweep.assert_not_called()
+
+    def test_retries_reuse_ping_sweep_when_that_was_the_fallback(self):
+        with patch("network_scanner.arp_scan", side_effect=ImportError()), \
+                patch("network_scanner.ping_sweep", return_value=[]) as mock_sweep:
+            ns.scan("192.168.1.0/24", timeout=1.0, retries=2)
+
+        assert mock_sweep.call_count == 3
+
+    def test_merged_results_stay_sorted_by_ip(self):
+        first_pass = [{"ip": "192.168.1.50", "mac": "", "hostname": ""}]
+        retry_pass = [{"ip": "192.168.1.5", "mac": "", "hostname": ""}]
+        with patch("network_scanner.arp_scan", side_effect=[first_pass, retry_pass]):
+            result = ns.scan("192.168.1.0/24", timeout=1.0, retries=1)
+
+        assert [d["ip"] for d in result] == ["192.168.1.5", "192.168.1.50"]
 
 
 class TestDeviceIdentity:

@@ -213,6 +213,55 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       truth for what's configurable, rather than drifting out of sync
       with a second, separately-maintained schema.
 
+- [x] **`--retries N`.** A single dropped ARP/ping reply (or one flaky TCP
+      connect on the mobile script) currently makes a live device look
+      "missing" this run and "NEW" again next run, which pollutes every
+      registry-based feature - NEW/CHG/missing tracking, the IP-conflict
+      alert above, and webhook notifications all inherit that false
+      signal. A cheap re-probe before finalizing results should catch the
+      common transient case.
+      Done: `scan()` in `network_scanner.py` gained a `retries` parameter
+      - each retry re-runs whichever method (ARP or ping-sweep) actually
+        worked the first time, as a fresh subnet-wide pass, merging any
+        newly-answering IP into the result. Re-running the *whole*
+        broadcast rather than targeting only the missing hosts individually
+        is deliberate: scapy's raw sockets aren't necessarily safe to hit
+        concurrently from several targeted single-host requests (the same
+        caveat "Parallel multi-subnet scanning" above already documents),
+        so a second full broadcast is the simple, safe option, even though
+        it's less targeted.
+      `tcp_scan()` in `mobile_network_scanner.py` gained the same
+      parameter but a more targeted implementation: each retry only
+      re-probes hosts still missing a match (already-found hosts aren't
+      re-probed), since this script talks to each host individually over
+      plain TCP rather than one subnet-wide broadcast - concurrent TCP
+      connects don't share network_scanner.py's raw-socket safety concern.
+      Both default to 0 (a single pass), preserving prior behavior exactly.
+      `--retries N` added to both CLIs. Verified end-to-end through the
+      real `main()` CLI path on both scripts: a flaky discovery function
+      that misses a known device on its first call but answers from the
+      second call on correctly shows the device as present (not missing,
+      not falsely re-flagged NEW) with `--retries 1`, and correctly shows
+      it as missing with the default of 0 retries - confirmed by call-count
+      assertions on the underlying (unmocked report/registry) scan path.
+
+- [ ] **Prometheus textfile export (`--metrics-file`).** Write scan counts
+      (device count, new count, risky count, IP-conflict count) in
+      Prometheus exposition format to a file, so `node_exporter`'s
+      textfile collector can pick it up - turns any `--watch` box into a
+      Grafana-graphable metric with no new runtime dependency. Reuses the
+      same data the scan history log and webhook notification already
+      compute; mostly a matter of formatting it differently.
+
+- [ ] **Known-devices registry export/import.** A way to back up or move
+      `~/.cache/network_scanner_known_devices.json` (and its
+      `mobile_network_scanner.py` equivalent) to a new machine, since
+      labeling effort (see "Custom device labels/aliases") currently
+      lives only on the one box that ran `--set-label`. Simplest version
+      is probably just documenting "it's a plain JSON file, copy it" -
+      worth checking whether that's actually enough before building
+      dedicated import/export flags around it.
+
 - [x] **Scan-diff tool.** A natural complement to CSV/JSON export above:
       compare two saved scans and report what changed between them
       (devices added/removed, per-field changes on ones present in

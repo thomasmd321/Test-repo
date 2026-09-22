@@ -164,6 +164,7 @@ def scan_all_subnets(
     check_risky_ports: bool = True,
     excluded_networks: Sequence["ipaddress._BaseNetwork"] = (),
     max_subnet_workers: int = 8,
+    retries: int = 0,
 ) -> List[Device]:
     """Run scan() over multiple subnets, in parallel, and merge the results into one list.
 
@@ -210,6 +211,10 @@ def scan_all_subnets(
             sandbox has a broken scapy/cryptography install - see
             --doctor - so this was validated with mocked, not real,
             concurrent scans; see test_scan_all_subnets_runs_subnets_concurrently()).
+        retries: Passed through to scan() for each subnet (see its
+            docstring) - extra scan passes to recover a device that
+            didn't answer the first broadcast/ping-sweep pass. 0 (the
+            default) preserves the original single-pass behavior.
 
     Returns:
         Every discovered device across all subnets, sorted by IP and
@@ -223,7 +228,7 @@ def scan_all_subnets(
         # Hostname resolution happens per subnet, before merging - mDNS/
         # DNS-SD traffic doesn't cross subnet boundaries, so a device on
         # one subnet can never answer a query sent while scanning another.
-        return _resolve_missing_hostnames(scan(subnet, timeout), mdns_timeout)
+        return _resolve_missing_hostnames(scan(subnet, timeout, retries=retries), mdns_timeout)
 
     # Keyed by IP so a later subnet's result for the same address simply
     # overwrites the earlier one rather than producing a duplicate row.
@@ -1822,27 +1827,55 @@ def identify_device(
     return device
 
 
-def scan(subnet: str, timeout: float) -> List[Device]:
+def scan(subnet: str, timeout: float, retries: int = 0) -> List[Device]:
     """Scan the subnet, preferring an ARP scan and falling back to a ping sweep.
 
     Args:
         subnet: CIDR range to scan, e.g. "192.168.1.0/24".
         timeout: Timeout in seconds, passed through to whichever scan
             method actually runs.
+        retries: Extra scan passes to run beyond the first, merging in
+            any device that answers on a later pass but didn't on the
+            first. A single dropped ARP/ping reply (a momentarily busy
+            switch, one lost broadcast frame) shouldn't make a device
+            that's actually still there look "missing" this run and
+            "NEW" again next run - re-running the same broadcast/
+            ping-sweep pass a few more times catches exactly that case.
+            Each retry re-runs whichever method actually worked the
+            first time (never a mix of both), as a fresh subnet-wide
+            pass rather than targeting only the individual hosts that
+            didn't answer - scapy's raw sockets aren't necessarily safe
+            to hit concurrently from several targeted single-host
+            requests (see scan_all_subnets()'s max_subnet_workers
+            docstring), so re-broadcasting to the whole subnet again is
+            simple and safe by comparison, if less targeted. 0 (the
+            default) preserves the original single-pass behavior exactly.
 
     Returns:
         Discovered devices, in whichever format arp_scan()/ping_sweep()
-        produced (see their docstrings for the exact shape).
+        produced (see their docstrings for the exact shape), merged
+        across every pass and de-duplicated by IP.
     """
     try:
-        return arp_scan(subnet, timeout)
+        method = arp_scan
+        devices = arp_scan(subnet, timeout)
     except (ImportError, PermissionError, OSError):
         # ImportError: scapy isn't installed.
         # PermissionError/OSError: scapy is installed but we can't open
         # the raw socket it needs (not running as root/administrator).
         # Any other exception is unexpected and should propagate, since
         # silently swallowing it could hide a real bug.
-        return ping_sweep(subnet, timeout)
+        method = ping_sweep
+        devices = ping_sweep(subnet, timeout)
+
+    if retries:
+        by_ip = {device["ip"]: device for device in devices}
+        for _ in range(retries):
+            for device in method(subnet, timeout):
+                by_ip.setdefault(device["ip"], device)
+        devices = sorted(by_ip.values(), key=lambda d: ipaddress.ip_address(d["ip"]))
+
+    return devices
 
 
 # --- Colorized terminal output ---
@@ -2311,6 +2344,12 @@ def main() -> None:
     )
     parser.add_argument("--timeout", type=float, default=1.0, help="Timeout in seconds per host (default: 1.0)")
     parser.add_argument(
+        "--retries",
+        type=int,
+        default=0,
+        help="Extra ARP/ping-sweep passes beyond the first, to recover a device that missed one reply due to transient packet loss (default: 0, i.e. a single pass) - see scan()",
+    )
+    parser.add_argument(
         "--mdns-timeout",
         type=float,
         default=0.3,
@@ -2500,6 +2539,7 @@ def main() -> None:
                 port_timeout=args.port_timeout,
                 check_risky_ports=not args.no_risky_ports,
                 excluded_networks=excluded_networks,
+                retries=args.retries,
             )
         except RuntimeError as exc:
             # A missing required dependency (e.g. no `ping` binary at
