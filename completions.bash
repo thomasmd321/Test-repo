@@ -1,5 +1,6 @@
 # Bash tab-completion for network_scanner.py, mobile_network_scanner.py,
-# scan_diff.py, mdns_browser.py, wifi_scanner.py, and exposure_check.py.
+# scan_diff.py, mdns_browser.py, wifi_scanner.py, exposure_check.py,
+# traceroute_mapper.py, arp_monitor.py, and lan_throughput.py.
 #
 # Usage: source this file, e.g. from ~/.bashrc:
 #   source /path/to/Test-repo/completions.bash
@@ -73,3 +74,24 @@ _exposure_check_completions() {
     COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
 }
 complete -F _exposure_check_completions exposure_check.py
+
+_traceroute_mapper_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --max-hops --timeout --no-resolve-hostnames --output --no-color"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _traceroute_mapper_completions traceroute_mapper.py
+
+_arp_monitor_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --interface --log --no-color"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _arp_monitor_completions arp_monitor.py
+
+_lan_throughput_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --serve --client --port --duration --once"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _lan_throughput_completions lan_throughput.py

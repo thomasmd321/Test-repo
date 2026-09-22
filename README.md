@@ -4,8 +4,11 @@ Python tools for understanding your local network: which devices are on
 it (`network_scanner.py`, `mobile_network_scanner.py`), what changed
 between two scans (`scan_diff.py`), what services they're advertising
 (`mdns_browser.py`), what Wi-Fi networks are in range (`wifi_scanner.py`),
-and whether anything risky is reachable from outside it
-(`exposure_check.py`).
+whether anything risky is reachable from outside it
+(`exposure_check.py`), where a slow connection is actually slow
+(`traceroute_mapper.py`), whether something is spoofing another device's
+IP right now (`arp_monitor.py`), and how fast the LAN itself actually is
+(`lan_throughput.py`).
 
 📄 See [`docs/network_scanner_guide.pdf`](docs/network_scanner_guide.pdf) for a
 printable setup/usage guide with pipeline diagrams and a full options
@@ -611,6 +614,96 @@ network, a phone on cellular data with Wi-Fi off, or a third-party online
 port-checking site you choose yourself) before acting on either one. This
 tool is a cheap first pass, not the final word — the CLI itself prints
 this same caveat after every run.
+
+## Mapping the path to a host (`traceroute_mapper.py`)
+
+Neither `exposure_check.py`'s "is this port reachable" nor
+`wifi_scanner.py`'s "is my signal weak" tells you *where* along the path
+a slow connection is actually slow. This does: it wraps the OS's own
+traceroute tool and reports every hop's IP, hostname, and round-trip time.
+
+```
+python traceroute_mapper.py 8.8.8.8
+python traceroute_mapper.py google.com --max-hops 20
+python traceroute_mapper.py 192.168.1.1 --no-resolve-hostnames
+python traceroute_mapper.py 8.8.8.8 --output path.json
+```
+
+Runs each platform's tool in numeric-only mode — `traceroute -n` on
+Linux/macOS, `tracert -d` on Windows — specifically to sidestep the
+biggest source of cross-platform output differences, then resolves each
+hop's hostname itself afterward via plain reverse DNS, rather than
+depending on the traceroute binary's own often-inconsistent DNS handling.
+A hop that timed out on every probe still shows up (with no IP, three
+missed replies) rather than being silently dropped, so a gap in the path
+stays visible; a hop whose best RTT is notably high is called out in the
+output.
+
+**Known limitation, stated plainly:** this project's own development
+environment has no `traceroute`/`tracert` binary at all, so every
+platform's parser here is verified only against mocked command output
+matching each tool's documented format (plus one real subprocess run
+against a fake `traceroute` script on `PATH`) — never against a real path
+on real hardware, on any of the three platforms. Traceroute output varies
+more between tool versions/distros than most formats parsed elsewhere in
+this project; treat a first real run as the verification it hasn't had yet.
+
+## Watching for ARP spoofing (`arp_monitor.py`)
+
+The IP-conflict alert built into `network_scanner.py` (see above) only
+samples at scan time — a full scan every few minutes at best under
+`--watch` — so a live man-in-the-middle attack happening *between* scans
+can go unnoticed until the next one, if ever. `arp_monitor.py` watches
+continuously instead: every ARP reply on the wire is observed as it
+happens, and any IP whose MAC changes mid-session is flagged immediately.
+
+```
+python arp_monitor.py                     # watch the default interface
+python arp_monitor.py --interface eth0
+python arp_monitor.py --log conflicts.jsonl
+```
+
+Needs scapy and the same raw-socket privileges (root/administrator) as
+`network_scanner.py`'s ARP scan — there's no way to passively observe ARP
+traffic without them. Like the IP-conflict alert it complements, this is
+a hygiene/detection aid, not a full intrusion-detection system: a MAC
+change is exactly as likely to be an ordinary DHCP lease reassignment as
+an actual attack, and it can't catch spoofing already fully established
+before it started watching (there's no "before" to compare against yet).
+A change on your router/gateway's own IP is the one case worth treating
+as urgent.
+
+**Known limitation, stated plainly:** this project's own development
+environment has a broken scapy/cryptography install (see `--doctor` in
+`network_scanner.py`) and no raw-socket privileges either, so the actual
+packet-sniffing path has never run for real in this environment. The
+pure detection logic it calls (`process_arp_observation()`) is fully
+unit-tested and needs nothing from scapy at all; the `sniff()` wiring
+around it is verified only by faking out the scapy import in tests, not
+against real ARP traffic on real hardware.
+
+## Measuring LAN throughput (`lan_throughput.py`)
+
+None of the other tools here measure this at all: "my internet feels
+slow" and "my LAN itself is slow" are different problems, and only a real
+transfer between two devices on the same network tells you which one you
+actually have.
+
+```
+python lan_throughput.py --serve                    # on the receiving machine
+python lan_throughput.py --serve --port 6000 --once
+python lan_throughput.py --client 192.168.1.50       # on the sending machine
+python lan_throughput.py --client 192.168.1.50 --duration 10 --port 6000
+```
+
+Plain TCP sockets, no dependency: one machine listens and reports what it
+received; the other streams random data at it for a fixed duration (random,
+not zeros, since some links compress a repeating pattern in a way that
+would over-report the result) and reports what it actually managed to
+send. This measures TCP goodput between exactly these two processes, not
+raw link-layer bandwidth or a multi-stream aggregate the way a dedicated
+tool like `iperf3` does — treat it as a quick, no-install sanity check,
+not a substitute for `iperf3` when you need a rigorous number.
 
 ## Notifications for `--watch`
 

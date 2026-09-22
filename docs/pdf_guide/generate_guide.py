@@ -941,6 +941,105 @@ python3 exposure_check.py --output exposure.json"""))
     story.append(Spacer(1, 0.1 * inch))
     story.append(warn_table3)
 
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ traceroute_mapper.py
+    story.append(Paragraph("15. traceroute_mapper.py: path mapping", styles["H1"]))
+    story.append(Paragraph(
+        "Neither exposure_check.py's “is this port reachable” nor wifi_scanner.py's "
+        "“is my signal weak” says where along the path a slow connection is actually slow. "
+        "This does, by wrapping the OS's own traceroute tool and reporting every hop's IP, hostname, "
+        "and round-trip time.", styles["Body"]))
+    story.append(code_block("""python3 traceroute_mapper.py 8.8.8.8
+python3 traceroute_mapper.py google.com --max-hops 20
+python3 traceroute_mapper.py 192.168.1.1 --no-resolve-hostnames
+python3 traceroute_mapper.py 8.8.8.8 --output path.json"""))
+    story.append(Paragraph(
+        "Runs each platform's tool numeric-only (traceroute -n on Linux/macOS, tracert -d on "
+        "Windows) specifically to sidestep the biggest source of cross-platform output differences, "
+        "then resolves each hop's hostname itself afterward via plain reverse DNS rather than "
+        "depending on the traceroute binary's own often-inconsistent DNS handling. A hop that timed "
+        "out on every probe still shows up (no IP, three missed replies) rather than being silently "
+        "dropped, so a gap in the path stays visible.", styles["Body"]))
+
+    warn_data4 = [[Paragraph(
+        "<b>Known limitation, stated plainly:</b> this project's own development environment has no "
+        "traceroute/tracert binary installed at all, so every platform's parser here is verified "
+        "only against mocked command output matching each tool's documented format, never against a "
+        "real path on real hardware, on any of the three platforms. Traceroute output varies more "
+        "between tool versions/distros than most formats parsed elsewhere in this project - treat a "
+        "first real run on any platform as the verification it hasn't had yet.", styles["Body"]
+    )]]
+    warn_table4 = Table(warn_data4, colWidths=[6.4 * inch])
+    warn_table4.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff6e5")),
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#e0a940")),
+        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(Spacer(1, 0.1 * inch))
+    story.append(warn_table4)
+
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ arp_monitor.py
+    story.append(Paragraph("16. arp_monitor.py: ARP-spoofing watch", styles["H1"]))
+    story.append(Paragraph(
+        "network_scanner.py's IP-conflict alert only samples at scan time - a full scan every few "
+        "minutes at best under --watch - so a live man-in-the-middle attack happening between scans "
+        "can go unnoticed until the next one, if ever. arp_monitor.py watches continuously instead: "
+        "every ARP reply on the wire is observed as it happens, and any IP whose MAC changes "
+        "mid-session is flagged immediately.", styles["Body"]))
+    story.append(code_block("""python3 arp_monitor.py                     # watch default interface
+python3 arp_monitor.py --interface eth0
+python3 arp_monitor.py --log conflicts.jsonl"""))
+    story.append(Paragraph(
+        "Needs scapy and the same raw-socket privileges (root/administrator) as network_scanner.py's "
+        "ARP scan - there's no way to passively observe ARP traffic without them. Like the "
+        "IP-conflict alert it complements, this is a hygiene/detection aid, not a full "
+        "intrusion-detection system: a MAC change is exactly as likely to be an ordinary DHCP lease "
+        "reassignment as an actual attack. A change on your router/gateway's own IP is the one case "
+        "worth treating as urgent.", styles["Body"]))
+
+    warn_data5 = [[Paragraph(
+        "<b>Known limitation, stated plainly:</b> this project's own development environment has a "
+        "broken scapy/cryptography install (see --doctor in network_scanner.py) and no raw-socket "
+        "privileges either, so the actual packet-sniffing path has never run for real here. The pure "
+        "detection logic it calls (process_arp_observation()) is fully unit-tested and needs nothing "
+        "from scapy at all; the sniff() wiring around it is verified only by faking out the scapy "
+        "import in tests, not against real ARP traffic on real hardware.", styles["Body"]
+    )]]
+    warn_table5 = Table(warn_data5, colWidths=[6.4 * inch])
+    warn_table5.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff6e5")),
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#e0a940")),
+        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(Spacer(1, 0.1 * inch))
+    story.append(warn_table5)
+
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ lan_throughput.py
+    story.append(Paragraph("17. lan_throughput.py: LAN throughput", styles["H1"]))
+    story.append(Paragraph(
+        "None of the other tools here measure this at all: “my internet feels slow” and "
+        "“my LAN itself is slow” are different problems, and only a real transfer between "
+        "two devices on the same network tells you which one you actually have.", styles["Body"]))
+    story.append(code_block("""python3 lan_throughput.py --serve
+python3 lan_throughput.py --serve --port 6000 --once
+python3 lan_throughput.py --client 192.168.1.50
+python3 lan_throughput.py --client 192.168.1.50 --duration 10"""))
+    story.append(Paragraph(
+        "Plain TCP sockets, no dependency: one machine listens and reports what it received; the "
+        "other streams random data at it for a fixed duration (random, not zeros, since some links "
+        "compress a repeating pattern in a way that would over-report the result) and reports what "
+        "it actually managed to send. This measures TCP goodput between exactly these two processes, "
+        "not raw link-layer bandwidth or a multi-stream aggregate the way a dedicated tool like "
+        "iperf3 does - treat it as a quick, no-install sanity check, not a substitute for iperf3 when "
+        "a rigorous number is needed.", styles["Body"]))
+
     doc = SimpleDocTemplate(
         str(out_path),
         pagesize=letter,

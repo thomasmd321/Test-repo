@@ -363,6 +363,95 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       the real internet) is standard `urllib` code, covered by mocked
       tests, but unverified against the real service from this sandbox.
 
+- [x] **Latency/traceroute mapper.** Neither `exposure_check.py`'s "is
+      this port reachable" nor `wifi_scanner.py`'s "is my signal weak"
+      says *where* along the path a slow connection is actually slow -
+      worth a dedicated tool for that.
+      Done: `traceroute_mapper.py`, a new standalone script wrapping each
+      platform's own tool numeric-only (`traceroute -n` on Linux/macOS,
+      `tracert -d` on Windows) specifically to sidestep the biggest
+      source of cross-platform output differences, then resolving each
+      hop's hostname itself afterward via plain reverse DNS rather than
+      depending on the traceroute binary's own inconsistent DNS handling
+      across platforms. A hop that timed out on every probe still shows
+      up (no IP, three missed replies) instead of being silently dropped,
+      so a gap in the path stays visible; a hop with a notably high best
+      RTT is called out in the output, the same hygiene-flagging spirit
+      as `RISKY_PORTS` elsewhere.
+      **Known limitation, stated plainly:** this environment has no
+      `traceroute`/`tracert` binary at all, so every platform's parser is
+      verified only against mocked command output matching each tool's
+      documented format (`test_traceroute_mapper.py`) - never against a
+      real path on real hardware, on any platform. One real subprocess
+      run *was* done against a fake `traceroute` script placed on `PATH`,
+      which also exercised genuine reverse-DNS resolution for real
+      (127.0.0.1 -> localhost, 8.8.8.8 -> dns.google) - confirming the
+      full subprocess -> parse -> resolve -> print pipeline works, just
+      not the real traceroute binary's actual output format on any
+      platform. Traceroute output varies more between tool versions/
+      distros than most formats parsed elsewhere in this project; treat a
+      first real run on any platform as the verification it hasn't had yet.
+
+- [x] **Passive ARP-spoofing monitor.** `network_scanner.py`'s
+      IP-conflict alert only samples at scan time - a full scan every few
+      minutes at best under `--watch` - so a live man-in-the-middle
+      attack happening *between* scans could go unnoticed until the next
+      one, if ever. A tool that watches continuously instead would catch
+      it as it happens.
+      Done: `arp_monitor.py`, a new standalone script. `sniff()`s ARP
+      traffic (scapy, same raw-socket privilege requirement as
+      `network_scanner.py`'s ARP scan) and flags any IP whose MAC changes
+      mid-session - the identical underlying signal
+      `_find_ip_conflicts()` already uses, just detected passively and in
+      real time instead of by diffing two periodic snapshots. The actual
+      detection logic (`process_arp_observation()`) is a pure function
+      completely independent of scapy's packet objects or the sniffing
+      loop around it, specifically so it can be unit-tested without
+      scapy at all. `--log FILE` appends each detected change as one
+      JSON line, the same append-only spirit as the scan history log.
+      Caught and fixed a real bug before it shipped, the exact same class
+      already found and fixed in `--doctor`'s scapy check earlier in this
+      project: `main()`'s original `except ImportError` didn't catch the
+      `pyo3_runtime.PanicException` this sandbox's broken scapy/
+      cryptography install actually raises on import, since that
+      exception subclasses `BaseException` directly, not `Exception` -
+      confirmed by actually running the script against this sandbox's
+      real broken scapy install and watching it crash with a raw
+      traceback, then fixed by broadening to `except BaseException` (with
+      `KeyboardInterrupt` and `(PermissionError, OSError)` still caught
+      separately first), and reverified against the same real broken
+      install afterward, which now prints a clean error and exits 1.
+      **Known limitation, stated plainly:** this environment's scapy
+      install is broken and it has no raw-socket privileges either, so
+      the actual packet-sniffing path (`monitor()`'s `sniff()` call) has
+      never captured real ARP traffic in this session. It's tested by
+      faking out the `scapy.all` import entirely (`patch.dict(sys.modules,
+      ...)`) so `monitor()`'s own wiring runs for real against a fake
+      `sniff()`, which is a genuine test of that function's logic - but
+      real ARP packets from real hardware remain unverified.
+
+- [x] **LAN throughput tester.** None of the other tools here measure
+      this at all - "my internet feels slow" and "my LAN itself is slow"
+      are different problems, and only a real transfer between two
+      devices on the same network tells you which one you actually have.
+      Done: `lan_throughput.py`, a new standalone script - plain TCP
+      sockets, no dependency. `--serve` listens and reports what it
+      received; `--client HOST` streams `os.urandom()` data (random, not
+      zeros or a repeating pattern, since some links compress highly
+      repetitive payloads in a way that would over-report the result) for
+      a fixed `--duration` and reports what it actually managed to send.
+      Measures TCP goodput between exactly these two processes, not raw
+      link-layer bandwidth or a multi-stream aggregate the way a
+      dedicated tool like `iperf3` does - documented plainly as a quick
+      sanity check, not a substitute for `iperf3` when a rigorous number
+      is needed. The most thoroughly verified of any tool added this
+      round: every test uses real, unmocked sockets (a real loopback
+      listener and a real client, not a single mock in the whole test
+      file), and was also verified through two genuinely separate `python3
+      lan_throughput.py` processes talking over real loopback TCP end to
+      end via the actual CLI, confirming both sides agree on the exact
+      byte count transferred.
+
 - [x] **Scan-diff tool.** A natural complement to CSV/JSON export above:
       compare two saved scans and report what changed between them
       (devices added/removed, per-field changes on ones present in
