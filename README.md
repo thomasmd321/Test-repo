@@ -1,12 +1,18 @@
 # Test-repo
 
-Python tools for discovering devices on your local network.
+Python tools for understanding your local network: which devices are on
+it (`network_scanner.py`, `mobile_network_scanner.py`), what changed
+between two scans (`scan_diff.py`), what services they're advertising
+(`mdns_browser.py`), what Wi-Fi networks are in range (`wifi_scanner.py`),
+and whether anything risky is reachable from outside it
+(`exposure_check.py`).
 
 📄 See [`docs/network_scanner_guide.pdf`](docs/network_scanner_guide.pdf) for a
 printable setup/usage guide with pipeline diagrams and a full options
-reference for both scripts. It's a generated file — see
+reference for the two scanner scripts. It's a generated file — see
 [`docs/pdf_guide/`](docs/pdf_guide/) for the script that builds it (only
-needed if you're updating the guide itself, not for using either scanner).
+needed if you're updating the guide itself, not for using any of these
+tools).
 
 ## Scripts
 
@@ -502,6 +508,110 @@ files happen to have them. A device is matched across the two files by MAC
 when present, falling back to IP — the same identity rule
 `network_scanner.py`'s own known-devices tracking uses.
 
+## Browsing mDNS/DNS-SD services (`mdns_browser.py`)
+
+The other two scripts only ever ask mDNS/DNS-SD one narrow question at a
+time — "what's this IP's hostname?" or "is anything answering as a
+Chromecast?" `mdns_browser.py` asks the broader one: what services exist
+on this network at all — printers, AirPlay speakers, SSH-capable hosts,
+HomeKit accessories, anything advertising itself — without needing to
+already know an IP or guess a service type up front.
+
+```
+python mdns_browser.py                          # discover + browse everything found
+python mdns_browser.py --timeout 3
+python mdns_browser.py --services _http._tcp.local,_ipp._tcp.local
+python mdns_browser.py --no-discover             # skip auto-discovery, use built-ins only
+python mdns_browser.py --output services.json
+```
+
+It works in two phases. First, it asks DNS-SD's own "meta-query"
+(`_services._dns-sd._udp.local`, RFC 6763 §9) which service types are
+actually in use on the network — not every device implements this even
+when it implements browsing for its own type, so the result is unioned
+with a small built-in list of common types (Chromecast, AirPlay, IPP
+printers, SMB, SSH, HomeKit, and more — see `_COMMON_SERVICE_TYPES`).
+Second, it browses all of those types at once on a single socket, joining
+each response's PTR/SRV/A records into an `{ip: name}` map per type — the
+same join `mobile_network_scanner.py`'s own `mdns_service_lookup()` does
+for Chromecast specifically, generalized here to many types in one pass.
+
+Like the mDNS code in the other two scripts, this is best-effort (one
+query per type, reading whatever comes back within `--timeout`) and
+shares their iOS limitation — mDNS/DNS-SD sends fail outright there due
+to Apple's Local Network Privacy model (see `mobile_network_scanner.py`'s
+module docstring and `mdns_diagnostic.py`).
+
+## Scanning nearby Wi-Fi networks (`wifi_scanner.py`)
+
+A different, complementary question from the other tools here: not "what
+devices are on my network," but "what networks are in radio range at
+all," including ones you're not connected to. A network that feels slow
+is often channel congestion from a neighbor on the same channel, or a
+weak signal — neither of which device discovery can see.
+
+```
+python wifi_scanner.py
+python wifi_scanner.py --timeout 15
+python wifi_scanner.py --output networks.json
+```
+
+Shells out to each OS's own Wi-Fi tooling rather than a raw 802.11
+library (none ships in the standard library, and a packet-capture-based
+scanner would need monitor mode and root/administrator everywhere, a much
+higher bar): `nmcli` on Linux, the `airport` command-line tool on macOS
+(still present despite Apple's deprecation notice), and `netsh wlan show
+networks` on Windows. Signal strength is kept in whatever unit each
+platform's own tool reports (a percentage on Linux/Windows, dBm on
+macOS) rather than converted between them — there's no one true
+conversion, so labeling each honestly beats a false unification. An open/
+unencrypted network is called out in the output as a security nod, the
+same spirit as `RISKY_PORTS` elsewhere in this project.
+
+**Known limitation, stated plainly:** the parsing for all three platforms
+is verified only against mocked command output matching each tool's
+documented format (see `test_wifi_scanner.py`), not against real Wi-Fi
+hardware on any of the three OSes — the environment this was built in has
+none of `nmcli`/`airport`/`netsh` and no wireless hardware at all. Treat a
+first real run on any platform as the verification it hasn't had yet.
+
+## Checking internet-facing exposure (`exposure_check.py`)
+
+`RISKY_PORTS` elsewhere in this project flags a port from inside the
+LAN — but a risky port reachable only from your own network is a much
+smaller problem than the same port reachable from the whole internet.
+This asks the sharper question: is a LAN-risky port (or any port you
+name) also reachable from the outside, by probing your own public IP
+from this machine.
+
+```
+python exposure_check.py                        # RISKY_PORTS, auto-detected public IP
+python exposure_check.py --ports 22,80,443,8080
+python exposure_check.py --ip 203.0.113.5 --ports 22
+python exposure_check.py --output exposure.json
+```
+
+Your public IP is found with a single plain HTTP(S) request to
+[api.ipify.org](https://www.ipify.org) — a small, purpose-built "what's my
+IP" echo service, no account or API key needed, returning just the
+address as plain text. No other data about your network is sent
+anywhere; `--ip` skips this request entirely if you'd rather not make it,
+or already know the address.
+
+**Read this before trusting a result:** probing your own public IP from
+inside your own LAN is not a reliable substitute for a real external
+scan. Home routers implement NAT loopback/hairpinning inconsistently —
+some silently drop this traffic (a genuinely open port reports as a false
+"closed" here), others loop it back to a LAN device without truly routing
+it to the internet and back (a false "open" that doesn't prove an actual
+outside host could reach it). A closed result here is never proof of
+safety, and an open result is never definitive proof of exposure — both
+need confirming from a real external vantage point (a VPS, a friend's
+network, a phone on cellular data with Wi-Fi off, or a third-party online
+port-checking site you choose yourself) before acting on either one. This
+tool is a cheap first pass, not the final word — the CLI itself prints
+this same caveat after every run.
+
 ## Notifications for `--watch`
 
 `--notify-webhook URL` POSTs a plain-text summary to `URL` as
@@ -561,9 +671,9 @@ always means iOS's Local Network Privacy restriction (see
 
 ## Shell tab-completion
 
-`completions.bash` adds bash tab-completion for each script's flag names
-(18+ per script by now, easy to half-remember). Source it from your
-`~/.bashrc`:
+`completions.bash` adds bash tab-completion for every script's flag names
+(18+ for the two scanners, fewer for the smaller tools, but still easy to
+half-remember). Source it from your `~/.bashrc`:
 
 ```
 source /path/to/Test-repo/completions.bash
@@ -572,7 +682,7 @@ source /path/to/Test-repo/completions.bash
 It only completes flag *names*, not their arguments (a subnet, a port
 list, a file path), and only fires for a direct invocation matching a
 script's own name (`./network_scanner.py`, or the bare name if it's on
-PATH — see `chmod +x`, already set on all three scripts in this repo).
+PATH — see `chmod +x`, already set on every script in this repo).
 `python3 network_scanner.py <TAB>` does **not** trigger it: bash keys
 completion off the first word of the command line, which is `python3` in
 that case, not the script — see the comments at the top of
@@ -581,8 +691,10 @@ script on PATH so the bare-name form works).
 
 ## Tests
 
-Unit tests mock all network/subprocess calls, so they run without any real
-network access or elevated privileges:
+Unit tests mock nearly all network/subprocess calls (a handful instead use
+a real loopback socket this same machine both opens and connects to), so
+the suite runs without any real *external* network access or elevated
+privileges:
 
 ```
 pip install -r requirements-dev.txt

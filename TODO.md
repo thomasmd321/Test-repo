@@ -262,6 +262,107 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       worth checking whether that's actually enough before building
       dedicated import/export flags around it.
 
+- [x] **mDNS/DNS-SD service browser.** The other two scripts only ever ask
+      mDNS one narrow question at a time (a specific IP's hostname, or
+      whether anything answers as a Chromecast) - a standalone tool that
+      asks the broader "what services exist on this network at all"
+      question would surface printers, AirPlay speakers, HomeKit
+      accessories, and anything else advertising itself, without needing
+      to already know an IP or guess a service type first.
+      Done: `mdns_browser.py`, a new standalone script. Uses DNS-SD's own
+      "meta-query" (`_services._dns-sd._udp.local`, RFC 6763 §9) to
+      discover which service types are actually in use, unioned with a
+      small built-in list (`_COMMON_SERVICE_TYPES`) since not every
+      device implements the meta-query even when it implements browsing
+      for its own type. Browses every resulting type on one shared
+      socket rather than paying a full timeout per type. The mDNS wire-
+      format code (`_encode_dns_name`/`_decode_dns_name`/
+      `_build_mdns_ptr_query`/`_iter_mdns_records`/
+      `_collect_service_records`) is duplicated from
+      `mobile_network_scanner.py` rather than imported, same as every
+      other script here - see this file's own module docstring. Shares
+      the same iOS Local Network Privacy limitation as the mDNS code in
+      the other two scripts. Verified two ways: a real, unmocked
+      end-to-end test - a second local thread acting as a genuine mDNS
+      responder over real multicast sockets (loopback multicast works in
+      this environment; confirmed with a standalone sender/receiver probe
+      first) answered both the meta-query and a fake service-type query,
+      and `discover_service_types()`/`browse_services()` correctly
+      recovered the advertised device - plus a full mocked unit test
+      suite (`test_mdns_browser.py`) for CI, since real multicast
+      support isn't guaranteed consistent across every CI runner/
+      container network configuration.
+
+- [x] **Wi-Fi scanner.** A different, complementary question from device
+      discovery: not "what's on my network" but "what networks are in
+      radio range at all," including ones not connected to - a slow
+      network is often channel congestion or a weak signal, neither of
+      which device discovery can see.
+      Done: `wifi_scanner.py`, a new standalone script dispatching by
+      platform: `nmcli -t -f SSID,BSSID,CHAN,SIGNAL,SECURITY dev wifi
+      list` on Linux (its terse-mode colon-escaping needed a small custom
+      splitter, `_parse_nmcli_line()`, since a raw `.split(":")` would
+      misparse a BSSID's own colons), the `airport` command-line tool on
+      macOS (still present despite Apple's deprecation notice; its
+      columnar output doesn't reliably delimit an SSID containing spaces,
+      so parsing anchors on the BSSID - the one column guaranteed to
+      match a fixed MAC pattern - and splits around it), and `netsh wlan
+      show networks mode=bssid` on Windows (a stable, well-documented
+      indented-block format). Signal strength is kept in each platform's
+      own native unit (percentage on Linux/Windows, dBm on macOS) rather
+      than converted between them, since there's no one true dBm<->percent
+      conversion - only a vendor-specific approximation, which would be
+      less honest than just labeling each. An open/unencrypted network is
+      called out in the output, the same hygiene-flagging spirit as
+      `RISKY_PORTS` elsewhere in this project.
+      **Known limitation, stated plainly:** this environment has none of
+      `nmcli`/`airport`/`netsh` installed and no Wi-Fi hardware at all, so
+      every platform's parser is verified only against mocked subprocess
+      output matching each tool's documented format
+      (`test_wifi_scanner.py`) - never against a real device on real
+      hardware, on any of the three platforms. The Linux path's
+      tool-missing error handling *was* verified for real (this sandbox
+      genuinely lacks `nmcli`, so that's the actual code path that ran),
+      and the full `subprocess.run` -> parse -> print -> `--output`
+      pipeline was verified end-to-end against a fake `nmcli` shell
+      script placed on `PATH` - but the real command's actual output
+      format on real Linux/macOS/Windows systems remains unverified.
+      Treat a first real run on any platform as the verification it
+      hasn't had yet, and please report back if a given tool version's
+      real output doesn't match what's parsed here.
+
+- [x] **External exposure checker.** `RISKY_PORTS` flags a port from
+      inside the LAN, but a risky port reachable only from your own
+      network is a much smaller problem than the same port reachable from
+      the whole internet - worth a sharper, separate check.
+      Done: `exposure_check.py`, a new standalone script. Determines your
+      public IP with one plain HTTP(S) GET to api.ipify.org (a small,
+      purpose-built "what's my IP" echo service - no account/API key, no
+      other data about your network sent anywhere; `--ip` skips this
+      entirely if you'd rather not make that request), then probes
+      `RISKY_PORTS`' ports (or any `--ports` you name) against it with a
+      plain TCP connect, concurrently. Deliberately framed around a loud,
+      unavoidable caveat rather than a clean pass/fail: probing your own
+      public IP from inside your own LAN is not a reliable substitute for
+      a real external scan, since home routers implement NAT loopback/
+      hairpinning inconsistently - some silently drop this traffic (a
+      real open port reports as a false "closed"), others loop it back to
+      a LAN device without truly routing to the internet and back (a
+      false "open" that doesn't prove external reachability either). The
+      CLI prints this caveat after every single run, not just on a
+      surprising result, since the ambiguity cuts both ways. Verified
+      end-to-end: `check_port()`/`check_exposure()` against a real local
+      loopback listener (genuine `socket.accept()`, not mocked) correctly
+      reported open vs. closed, and the full `main()` CLI pipeline ran
+      correctly end-to-end via `--ip` (bypassing the external IP-lookup
+      call). The real `api.ipify.org` call itself was exercised for real
+      too, though only its *failure* path: this sandbox's own outbound
+      proxy blocks that domain (403 on the CONNECT tunnel), which
+      confirmed `get_public_ip()` fails cleanly with a readable
+      `RuntimeError` rather than crashing - its success path (reaching
+      the real internet) is standard `urllib` code, covered by mocked
+      tests, but unverified against the real service from this sandbox.
+
 - [x] **Scan-diff tool.** A natural complement to CSV/JSON export above:
       compare two saved scans and report what changed between them
       (devices added/removed, per-field changes on ones present in

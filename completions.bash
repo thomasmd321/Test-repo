@@ -1,5 +1,5 @@
-# Bash tab-completion for network_scanner.py, mobile_network_scanner.py, and
-# scan_diff.py.
+# Bash tab-completion for network_scanner.py, mobile_network_scanner.py,
+# scan_diff.py, mdns_browser.py, wifi_scanner.py, and exposure_check.py.
 #
 # Usage: source this file, e.g. from ~/.bashrc:
 #   source /path/to/Test-repo/completions.bash
@@ -15,8 +15,8 @@
 #
 # Only fires for a *direct* invocation matching the script's own name
 # (./network_scanner.py, or plain network_scanner.py if it's on PATH and
-# executable - see chmod +x, already set on all three scripts in this
-# repo). "python3 network_scanner.py ..." does NOT trigger this: bash
+# executable - see chmod +x, already set on every script in this repo).
+# "python3 network_scanner.py ..." does NOT trigger this: bash
 # keys completion off COMP_WORDS[0], which would be "python3" in that
 # case, and hijacking every "python3 ..." command's completion just to
 # cover this one case would break completion for any other Python script
@@ -34,14 +34,14 @@
 
 _network_scanner_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
-    local opts="-h --help --all-subnets --identify --doctor --timeout --mdns-timeout --no-vendor-lookup --refresh-vendor-db --watch --no-track-devices --forget-known-devices --set-label --remove-label --ipv6 --ipv6-timeout --no-scan-ports --ports --exclude --port-timeout --no-risky-ports --no-color --output --quiet --notify-webhook --log-history --history-max-entries"
+    local opts="-h --help --all-subnets --identify --doctor --timeout --retries --mdns-timeout --no-vendor-lookup --refresh-vendor-db --watch --no-track-devices --forget-known-devices --set-label --remove-label --ipv6 --ipv6-timeout --no-scan-ports --ports --exclude --port-timeout --no-risky-ports --no-color --output --quiet --notify-webhook --log-history --history-max-entries"
     COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
 }
 complete -F _network_scanner_completions network_scanner.py
 
 _mobile_network_scanner_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
-    local opts="-h --help --timeout --ports --exclude --mdns-timeout --doctor --watch --no-track-devices --forget-known-devices --set-label --remove-label --no-banners --no-risky-ports --no-color --output --quiet --notify-webhook --log-history --history-max-entries"
+    local opts="-h --help --timeout --retries --ports --exclude --mdns-timeout --doctor --watch --no-track-devices --forget-known-devices --set-label --remove-label --no-banners --no-risky-ports --no-color --output --quiet --notify-webhook --log-history --history-max-entries"
     COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
 }
 complete -F _mobile_network_scanner_completions mobile_network_scanner.py
@@ -52,3 +52,24 @@ _scan_diff_completions() {
     COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
 }
 complete -F _scan_diff_completions scan_diff.py
+
+_mdns_browser_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --timeout --services --no-discover --output --no-color"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _mdns_browser_completions mdns_browser.py
+
+_wifi_scanner_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --timeout --output --no-color"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _wifi_scanner_completions wifi_scanner.py
+
+_exposure_check_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --ip --ports --timeout --output --no-color"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _exposure_check_completions exposure_check.py

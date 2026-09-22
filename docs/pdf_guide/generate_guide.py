@@ -828,6 +828,119 @@ python3 mobile_network_scanner.py --log-history history.jsonl"""))
         "<font face='Courier'>python3</font> in that case, not the script — putting the script "
         "on PATH so the bare-name form works is the practical fix.", styles["Body"]))
 
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ mdns_browser.py
+    story.append(Paragraph("12. mdns_browser.py: browsing mDNS/DNS-SD", styles["H1"]))
+    story.append(Paragraph(
+        "The other two scripts only ever ask mDNS/DNS-SD one narrow question at a time - what's "
+        "this IP's hostname, or is anything answering as a Chromecast. mdns_browser.py asks the "
+        "broader one: what services exist on this network at all - printers, AirPlay speakers, "
+        "SSH-capable hosts, HomeKit accessories, anything advertising itself - without needing to "
+        "already know an IP or guess a service type first.", styles["Body"]))
+    story.append(code_block("""python3 mdns_browser.py                    # discover + browse everything
+python3 mdns_browser.py --timeout 3
+python3 mdns_browser.py --services _http._tcp.local,_ipp._tcp.local
+python3 mdns_browser.py --no-discover       # built-ins only, skip discovery
+python3 mdns_browser.py --output services.json"""))
+    story.append(Paragraph(
+        "Works in two phases. First, DNS-SD's own “meta-query” "
+        "(_services._dns-sd._udp.local, RFC 6763 §9) asks which service types are actually in use "
+        "- not every device implements this even when it implements browsing for its own type, so "
+        "the result is unioned with a small built-in list of common types (Chromecast, AirPlay, IPP "
+        "printers, SMB, SSH, HomeKit, and more). Second, it browses all of those types at once on a "
+        "single socket, joining each response's PTR/SRV/A records into an {ip: name} map per type - "
+        "the same join mobile_network_scanner.py's own mdns_service_lookup() does for Chromecast "
+        "specifically, generalized here to many types in one pass.", styles["Body"]))
+    story.append(Paragraph(
+        "Best-effort, like the mDNS code elsewhere in this project (one query per type, reading "
+        "whatever comes back within --timeout), and shares the same iOS Local Network Privacy "
+        "limitation as the other two scripts' mDNS lookups.", styles["BodySmall"]))
+
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ wifi_scanner.py
+    story.append(Paragraph("13. Scanning nearby Wi-Fi networks (wifi_scanner.py)", styles["H1"]))
+    story.append(Paragraph(
+        "A different, complementary question from the rest of this project: not “what devices "
+        "are on my network” but “what networks are in radio range at all,” including "
+        "ones you're not connected to. A network that feels slow is often channel congestion from a "
+        "neighbor on the same channel, or a weak signal - neither of which device discovery can see.",
+        styles["Body"]))
+    story.append(code_block("""python3 wifi_scanner.py
+python3 wifi_scanner.py --timeout 15
+python3 wifi_scanner.py --output networks.json"""))
+    story.append(Paragraph(
+        "Shells out to each OS's own Wi-Fi tooling: nmcli on Linux, the airport command-line tool "
+        "on macOS (still present despite Apple's deprecation notice), and netsh wlan show networks "
+        "on Windows. Signal strength stays in whatever unit each platform's own tool reports (a "
+        "percentage on Linux/Windows, dBm on macOS) rather than being converted between them - there "
+        "is no one true conversion, so labeling each honestly beats a false unification. An open/"
+        "unencrypted network is called out in the output, the same hygiene-flagging spirit as "
+        "RISKY_PORTS elsewhere in this project.", styles["Body"]))
+
+    warn_data2 = [[Paragraph(
+        "<b>Known limitation, stated plainly:</b> this project's own development environment has "
+        "none of nmcli, airport, or netsh installed and no Wi-Fi hardware at all, so every "
+        "platform's parser here is verified only against mocked command output matching each "
+        "tool's documented format, never against a real device on real hardware, on any of the "
+        "three platforms. Treat a first real run on any platform as the verification it hasn't "
+        "had yet.", styles["Body"]
+    )]]
+    warn_table2 = Table(warn_data2, colWidths=[6.4 * inch])
+    warn_table2.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff6e5")),
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#e0a940")),
+        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(Spacer(1, 0.1 * inch))
+    story.append(warn_table2)
+
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ exposure_check.py
+    story.append(Paragraph("14. exposure_check.py: internet-facing exposure", styles["H1"]))
+    story.append(Paragraph(
+        "RISKY_PORTS elsewhere in this project flags a port from inside the LAN - but a risky port "
+        "reachable only from your own network is a much smaller problem than the same port reachable "
+        "from the whole internet. This asks the sharper question: is a LAN-risky port (or any port "
+        "you name) also reachable from outside, by probing your own public IP from this machine.",
+        styles["Body"]))
+    story.append(code_block("""python3 exposure_check.py                  # RISKY_PORTS, auto-detected IP
+python3 exposure_check.py --ports 22,80,443,8080
+python3 exposure_check.py --ip 203.0.113.5 --ports 22
+python3 exposure_check.py --output exposure.json"""))
+    story.append(Paragraph(
+        "Your public IP is found with a single plain HTTP(S) request to api.ipify.org - a small, "
+        "purpose-built “what's my IP” echo service, no account or API key needed, "
+        "returning just the address as plain text. No other data about your network is sent "
+        "anywhere; --ip skips this request entirely if you'd rather not make it, or already know "
+        "the address.", styles["Body"]))
+
+    warn_data3 = [[Paragraph(
+        "<b>Read this before trusting a result:</b> probing your own public IP from inside your "
+        "own LAN is not a reliable substitute for a real external scan. Home routers implement NAT "
+        "loopback/hairpinning inconsistently - some silently drop this traffic (a genuinely open "
+        "port reports as a false “closed” here), others loop it back to a LAN device "
+        "without truly routing it to the internet and back (a false “open” that doesn't "
+        "prove an actual outside host could reach it). A closed result here is never proof of "
+        "safety, and an open result is never definitive proof of exposure - both need confirming "
+        "from a real external vantage point (a VPS, a friend's network, a phone on cellular data "
+        "with Wi-Fi off, or a third-party online port-checking site you choose yourself) before "
+        "acting on either one. This tool is a cheap first pass, not the final word - the CLI itself "
+        "prints this same caveat after every run.", styles["Body"]
+    )]]
+    warn_table3 = Table(warn_data3, colWidths=[6.4 * inch])
+    warn_table3.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fdeaea")),
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#c23b32")),
+        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(Spacer(1, 0.1 * inch))
+    story.append(warn_table3)
+
     doc = SimpleDocTemplate(
         str(out_path),
         pagesize=letter,

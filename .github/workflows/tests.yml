@@ -12,9 +12,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # All three scanner scripts mock out every network/subprocess call
-        # in their tests, so this needs nothing beyond the stdlib + pytest -
-        # no scapy/psutil, no real network access, no elevated privileges.
+        # Every script here mocks out network/subprocess calls in its tests
+        # (aside from a few tests that talk to a real loopback socket this
+        # same job spins up), so this needs nothing beyond the stdlib +
+        # pytest - no scapy/psutil, no real network access, no elevated
+        # privileges.
         python-version: ["3.9", "3.10", "3.11", "3.12"]
 
     steps:
@@ -29,7 +31,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Compile-check every script
-        run: python -m py_compile network_scanner.py mobile_network_scanner.py scan_diff.py
+        run: python -m py_compile network_scanner.py mobile_network_scanner.py scan_diff.py mdns_browser.py wifi_scanner.py exposure_check.py
 
       - name: Run tests
         run: pytest -v
