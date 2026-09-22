@@ -273,3 +273,142 @@ class TestColorize:
 
     def test_returns_text_unchanged_when_disabled(self):
         assert ws._colorize("hello", "yellow", False) == "hello"
+
+
+class TestSecurityRank:
+    def test_ranks_wpa3_highest(self):
+        assert ws._security_rank("WPA3-Personal") == 4
+
+    def test_ranks_wpa2_below_wpa3(self):
+        assert ws._security_rank("WPA2(PSK/AES/AES)") < ws._security_rank("WPA3")
+
+    def test_ranks_plain_wpa_below_wpa2(self):
+        assert ws._security_rank("WPA1 WPA2") == ws._security_rank("WPA2")  # substring match picks the strongest present
+        assert ws._security_rank("WPA-Personal") < ws._security_rank("WPA2-Personal")
+
+    def test_ranks_wep_above_open_but_below_wpa(self):
+        assert ws._security_rank("WEP") == 1
+        assert 0 < ws._security_rank("WEP") < ws._security_rank("WPA")
+
+    def test_ranks_open_and_unrecognized_as_zero(self):
+        assert ws._security_rank("Open") == 0
+        assert ws._security_rank("") == 0
+        assert ws._security_rank("--") == 0
+
+
+class TestLoadSaveKnownNetworks:
+    def test_returns_empty_dict_when_file_does_not_exist(self, tmp_path):
+        assert ws._load_known_networks(tmp_path / "missing.json") == {}
+
+    def test_returns_empty_dict_on_corrupt_json(self, tmp_path):
+        path = tmp_path / "known.json"
+        path.write_text("not json", encoding="utf-8")
+
+        assert ws._load_known_networks(path) == {}
+
+    def test_round_trips_through_save_and_load(self, tmp_path):
+        path = tmp_path / "known.json"
+        known = {"MyWiFi": {"bssids": ["aa:bb:cc:dd:ee:ff"], "best_security": "WPA2", "best_security_rank": 3}}
+
+        ws._save_known_networks(known, path)
+
+        assert ws._load_known_networks(path) == known
+
+    def test_save_does_not_raise_when_write_fails(self, tmp_path, monkeypatch):
+        path = tmp_path / "known.json"
+        monkeypatch.setattr(ws.Path, "mkdir", lambda *a, **k: (_ for _ in ()).throw(OSError("Permission denied")))
+
+        ws._save_known_networks({"x": {}}, path)  # Should not raise.
+
+
+class TestFindEvilTwinCandidates:
+    def test_first_time_seeing_an_ssid_is_not_flagged(self):
+        networks = [{"ssid": "MyWiFi", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 6, "signal": "78%", "security": "WPA2"}]
+
+        assert ws._find_evil_twin_candidates(networks, known={}) == []
+
+    def test_a_known_ssid_from_a_known_bssid_with_the_same_security_is_not_flagged(self):
+        networks = [{"ssid": "MyWiFi", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 6, "signal": "78%", "security": "WPA2"}]
+        known = {"MyWiFi": {"bssids": ["aa:bb:cc:dd:ee:ff"], "best_security": "WPA2", "best_security_rank": 3}}
+
+        assert ws._find_evil_twin_candidates(networks, known) == []
+
+    def test_flags_a_security_downgrade(self):
+        networks = [{"ssid": "MyWiFi", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 6, "signal": "78%", "security": "Open"}]
+        known = {"MyWiFi": {"bssids": ["aa:bb:cc:dd:ee:ff"], "best_security": "WPA2", "best_security_rank": 3}}
+
+        candidates = ws._find_evil_twin_candidates(networks, known)
+
+        assert len(candidates) == 1
+        assert candidates[0]["kind"] == "security_downgrade"
+        assert candidates[0]["ssid"] == "MyWiFi"
+
+    def test_flags_a_new_bssid_for_a_known_ssid_with_unchanged_security(self):
+        networks = [{"ssid": "MyWiFi", "bssid": "11:22:33:44:55:66", "channel": 6, "signal": "78%", "security": "WPA2"}]
+        known = {"MyWiFi": {"bssids": ["aa:bb:cc:dd:ee:ff"], "best_security": "WPA2", "best_security_rank": 3}}
+
+        candidates = ws._find_evil_twin_candidates(networks, known)
+
+        assert len(candidates) == 1
+        assert candidates[0]["kind"] == "new_bssid"
+
+    def test_a_new_bssid_with_stronger_security_is_reported_as_new_bssid_not_downgrade(self):
+        networks = [{"ssid": "MyWiFi", "bssid": "11:22:33:44:55:66", "channel": 6, "signal": "78%", "security": "WPA3"}]
+        known = {"MyWiFi": {"bssids": ["aa:bb:cc:dd:ee:ff"], "best_security": "WPA2", "best_security_rank": 3}}
+
+        candidates = ws._find_evil_twin_candidates(networks, known)
+
+        assert len(candidates) == 1
+        assert candidates[0]["kind"] == "new_bssid"
+
+    def test_an_unrelated_ssid_in_the_registry_is_untouched(self):
+        networks = [{"ssid": "MyWiFi", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 6, "signal": "78%", "security": "WPA2"}]
+        known = {"OtherNetwork": {"bssids": ["11:22:33:44:55:66"], "best_security": "WPA2", "best_security_rank": 3}}
+
+        assert ws._find_evil_twin_candidates(networks, known) == []
+
+
+class TestUpdateKnownNetworks:
+    def test_creates_an_entry_for_a_new_ssid(self):
+        known = {}
+        networks = [{"ssid": "MyWiFi", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 6, "signal": "78%", "security": "WPA2"}]
+
+        ws._update_known_networks(networks, known)
+
+        assert known["MyWiFi"]["bssids"] == ["aa:bb:cc:dd:ee:ff"]
+        assert known["MyWiFi"]["best_security"] == "WPA2"
+        assert known["MyWiFi"]["best_security_rank"] == 3
+
+    def test_appends_a_new_bssid_without_dropping_the_old_one(self):
+        known = {"MyWiFi": {"bssids": ["aa:bb:cc:dd:ee:ff"], "best_security": "WPA2", "best_security_rank": 3}}
+        networks = [{"ssid": "MyWiFi", "bssid": "11:22:33:44:55:66", "channel": 6, "signal": "78%", "security": "WPA2"}]
+
+        ws._update_known_networks(networks, known)
+
+        assert sorted(known["MyWiFi"]["bssids"]) == ["11:22:33:44:55:66", "aa:bb:cc:dd:ee:ff"]
+
+    def test_does_not_re_add_an_already_known_bssid(self):
+        known = {"MyWiFi": {"bssids": ["aa:bb:cc:dd:ee:ff"], "best_security": "WPA2", "best_security_rank": 3}}
+        networks = [{"ssid": "MyWiFi", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 6, "signal": "78%", "security": "WPA2"}]
+
+        ws._update_known_networks(networks, known)
+
+        assert known["MyWiFi"]["bssids"] == ["aa:bb:cc:dd:ee:ff"]
+
+    def test_raises_the_high_water_mark_on_stronger_security(self):
+        known = {"MyWiFi": {"bssids": ["aa:bb:cc:dd:ee:ff"], "best_security": "WPA2", "best_security_rank": 3}}
+        networks = [{"ssid": "MyWiFi", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 6, "signal": "78%", "security": "WPA3"}]
+
+        ws._update_known_networks(networks, known)
+
+        assert known["MyWiFi"]["best_security_rank"] == 4
+        assert known["MyWiFi"]["best_security"] == "WPA3"
+
+    def test_never_lowers_the_high_water_mark_on_a_weaker_scan(self):
+        known = {"MyWiFi": {"bssids": ["aa:bb:cc:dd:ee:ff"], "best_security": "WPA2", "best_security_rank": 3}}
+        networks = [{"ssid": "MyWiFi", "bssid": "aa:bb:cc:dd:ee:ff", "channel": 6, "signal": "78%", "security": "Open"}]
+
+        ws._update_known_networks(networks, known)
+
+        assert known["MyWiFi"]["best_security_rank"] == 3
+        assert known["MyWiFi"]["best_security"] == "WPA2"

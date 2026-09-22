@@ -1,7 +1,7 @@
 # Bash tab-completion for network_scanner.py, mobile_network_scanner.py,
 # scan_diff.py, mdns_browser.py, wifi_scanner.py, exposure_check.py,
-# traceroute_mapper.py, arp_monitor.py, lan_throughput.py, and
-# upnp_audit.py.
+# traceroute_mapper.py, arp_monitor.py, lan_throughput.py, upnp_audit.py,
+# dhcp_monitor.py, dns_check.py, and network_dashboard.py.
 #
 # Usage: source this file, e.g. from ~/.bashrc:
 #   source /path/to/Test-repo/completions.bash
@@ -64,7 +64,7 @@ complete -F _mdns_browser_completions mdns_browser.py
 
 _wifi_scanner_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
-    local opts="-h --help --timeout --output --no-color"
+    local opts="-h --help --timeout --output --no-evil-twin-check --forget-known-networks --no-color"
     COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
 }
 complete -F _wifi_scanner_completions wifi_scanner.py
@@ -103,3 +103,24 @@ _upnp_audit_completions() {
     COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
 }
 complete -F _upnp_audit_completions upnp_audit.py
+
+_dhcp_monitor_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --bind-ip --trusted-server --log --no-color"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _dhcp_monitor_completions dhcp_monitor.py
+
+_dns_check_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --resolver --timeout --output --no-color"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _dns_check_completions dns_check.py
+
+_network_dashboard_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --registry --bind --port --refresh --stale-after --token"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _network_dashboard_completions network_dashboard.py

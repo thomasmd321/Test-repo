@@ -31,7 +31,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Compile-check every script
-        run: python -m py_compile network_scanner.py mobile_network_scanner.py scan_diff.py mdns_browser.py wifi_scanner.py exposure_check.py traceroute_mapper.py arp_monitor.py lan_throughput.py upnp_audit.py
+        run: python -m py_compile network_scanner.py mobile_network_scanner.py scan_diff.py mdns_browser.py wifi_scanner.py exposure_check.py traceroute_mapper.py arp_monitor.py lan_throughput.py upnp_audit.py dhcp_monitor.py dns_check.py network_dashboard.py
 
       - name: Run tests
         run: pytest -v

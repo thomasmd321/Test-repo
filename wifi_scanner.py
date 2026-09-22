@@ -48,6 +48,27 @@ never against a real device on real hardware. Treat a first run on any
 platform as the actual verification it hasn't had yet, and please report
 back (or send a patch) if a given OS/tool version's real output doesn't
 match what's parsed here.
+
+Also compares each scan against a small local registry of previously seen
+networks (~/.cache/wifi_scanner_known_networks.json, the same
+persisted-between-runs spirit as network_scanner.py's known-devices
+registry) to flag two evil-twin/rogue-AP patterns: a familiar SSID
+suddenly answering with *weaker* security than it's ever shown before (a
+classic downgrade attack - a legitimate AP doesn't just drop encryption on
+its own), and a familiar SSID answering from a BSSID never seen before
+(a softer signal - could be a genuinely new/roaming AP on a mesh or
+enterprise network with many legitimate access points sharing one SSID,
+so this is flagged for a second look, not treated as proof). See
+_find_evil_twin_candidates(). --no-evil-twin-check skips this entirely;
+--forget-known-networks clears the registry. The evil-twin logic itself
+is unit-tested with plain dicts (no subprocess/hardware involved at all),
+and was also run for real end-to-end against a fake nmcli script on PATH:
+a baseline WPA2 scan, an unchanged repeat (correctly silent), then a
+simulated downgrade to Open on the same BSSID (correctly flagged) and a
+new BSSID appearing under the same SSID (also correctly flagged, as
+"new_bssid" rather than "security_downgrade" once security itself hadn't
+weakened) - the full scan -> compare -> update-registry -> persist
+pipeline, exercised for real.
 """
 
 import argparse
@@ -260,10 +281,123 @@ def scan_wifi_networks(timeout: float = 10.0) -> List[Network]:
     raise RuntimeError(f"Wi-Fi scanning isn't supported on {system!r} (supported: Linux, macOS, Windows)")
 
 
+# --- Evil-twin / rogue-AP detection, via a small local known-networks registry ---
+
+_KNOWN_NETWORKS_PATH = Path.home() / ".cache" / "wifi_scanner_known_networks.json"
+
+
+def _security_rank(security: str) -> int:
+    """Rank a security string by strength, for detecting a downgrade.
+
+    Real tool output varies a lot across platforms/versions - nmcli might
+    say "WPA2 802.1X", airport "WPA2(PSK/AES/AES)", netsh
+    "WPA2-Personal" - so this matches by substring, checked strongest
+    first, rather than expecting an exact vocabulary. Anything unrecognized
+    (including a genuinely open network) ranks lowest.
+    """
+    s = (security or "").lower()
+    if "wpa3" in s:
+        return 4
+    if "wpa2" in s:
+        return 3
+    if "wpa" in s:
+        return 2
+    if "wep" in s:
+        return 1
+    return 0
+
+
+def _load_known_networks(path: Path) -> Dict[str, dict]:
+    """Load the known-networks registry from disk - {} if it doesn't exist yet or is unreadable/corrupt."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_known_networks(known: Dict[str, dict], path: Path) -> None:
+    """Persist the known-networks registry - a failed write deliberately doesn't raise, same as network_scanner.py's _save_known_devices()."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(known, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _find_evil_twin_candidates(networks: List[Network], known: Dict[str, dict]) -> List[Dict[str, str]]:
+    """Compare this scan's networks against the known-networks registry, before it's updated.
+
+    Must run before _update_known_networks() overwrites the registry's
+    per-SSID best-security-seen and BSSID list - the same before/after
+    ordering network_scanner.py's _find_port_changes() needs relative to
+    _mark_new_devices(), for the identical reason.
+
+    Args:
+        networks: This scan's results.
+        known: The known-networks registry, as loaded by
+            _load_known_networks() - read only, not mutated here.
+
+    Returns:
+        One dict per flagged network: {"ssid", "bssid", "kind" ("security_downgrade"
+        or "new_bssid"), "detail"}. An SSID seen for the very first time
+        this session produces nothing here - there's no "before" yet to
+        compare against, the same reasoning arp_monitor.py's
+        process_arp_observation() documents for a first-ever observation.
+    """
+    candidates: List[Dict[str, str]] = []
+    for network in networks:
+        ssid = network["ssid"]
+        entry = known.get(ssid)
+        if entry is None:
+            continue
+
+        current_rank = _security_rank(network["security"])
+        best_known_rank = entry.get("best_security_rank", 0)
+        if current_rank < best_known_rank:
+            candidates.append({
+                "ssid": ssid, "bssid": network["bssid"], "kind": "security_downgrade",
+                "detail": (
+                    f"{ssid} previously showed stronger security ({entry.get('best_security') or 'Open'}) "
+                    f"but is now answering as {network['security'] or 'Open'} from {network['bssid']} - "
+                    "a classic evil-twin/downgrade pattern"
+                ),
+            })
+        elif network["bssid"] not in entry.get("bssids", []):
+            candidates.append({
+                "ssid": ssid, "bssid": network["bssid"], "kind": "new_bssid",
+                "detail": (
+                    f"{ssid} is answering from a new access point ({network['bssid']}) not seen before - "
+                    "could be a legitimate new/roaming AP on a mesh network, or worth a second look"
+                ),
+            })
+    return candidates
+
+
+def _update_known_networks(networks: List[Network], known: Dict[str, dict]) -> None:
+    """Record this scan's networks into the known-networks registry, in place.
+
+    For each SSID: remembers every distinct BSSID ever seen for it, and
+    the strongest security level ever seen (never *downgrades* what's
+    remembered just because one scan happened to see a weaker level - the
+    whole point is to keep the high-water mark to compare future scans
+    against).
+    """
+    for network in networks:
+        ssid = network["ssid"]
+        rank = _security_rank(network["security"])
+        entry = known.setdefault(ssid, {"bssids": [], "best_security": network["security"], "best_security_rank": rank})
+        if network["bssid"] not in entry["bssids"]:
+            entry["bssids"].append(network["bssid"])
+        if rank > entry.get("best_security_rank", 0):
+            entry["best_security_rank"] = rank
+            entry["best_security"] = network["security"]
+
+
 # --- Colorized terminal output (plain ANSI codes, no dependency) ---
 
 _ANSI_CODES: Dict[str, str] = {
     "yellow": "\033[33m",
+    "magenta": "\033[35m",
     "reset": "\033[0m",
 }
 
@@ -297,10 +431,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--timeout", type=float, default=10.0, help="How long to wait for the OS scan command, in seconds (default: 10.0)")
     parser.add_argument("--output", type=str, default=None, metavar="FILE", help="Save results to FILE as JSON or CSV")
+    parser.add_argument("--no-evil-twin-check", action="store_true", help="Skip comparing against previously seen SSIDs/security (see the known-networks registry)")
+    parser.add_argument("--forget-known-networks", action="store_true", help="Clear the known-networks registry used for evil-twin detection")
     parser.add_argument("--no-color", action="store_true", help="Disable ANSI color output")
     args = parser.parse_args()
 
     color = _use_color(args.no_color)
+
+    if args.forget_known_networks:
+        _save_known_networks({}, _KNOWN_NETWORKS_PATH)
+        print(f"Cleared {_KNOWN_NETWORKS_PATH}.")
 
     print("Scanning for nearby Wi-Fi networks ...")
     try:
@@ -330,6 +470,14 @@ def main() -> None:
         print(_colorize(f" {open_count} open/unencrypted.", "yellow", color))
     else:
         print()
+
+    if not args.no_evil_twin_check:
+        known = _load_known_networks(_KNOWN_NETWORKS_PATH)
+        candidates = _find_evil_twin_candidates(networks, known)
+        for candidate in candidates:
+            print(_colorize(f"\n⚠ {candidate['detail']}", "magenta", color))
+        _update_known_networks(networks, known)
+        _save_known_networks(known, _KNOWN_NETWORKS_PATH)
 
     if args.output:
         export_results(networks, Path(args.output))

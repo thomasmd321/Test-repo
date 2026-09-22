@@ -7,9 +7,13 @@ between two scans (`scan_diff.py`), what services they're advertising
 whether anything risky is reachable from outside it
 (`exposure_check.py`), where a slow connection is actually slow
 (`traceroute_mapper.py`), whether something is spoofing another device's
-IP right now (`arp_monitor.py`), how fast the LAN itself actually is
-(`lan_throughput.py`), and which ports your router's UPnP has quietly
-opened to the internet (`upnp_audit.py`).
+IP right now (`arp_monitor.py`), whether an unauthorized DHCP server is
+handing out its own leases (`dhcp_monitor.py`), whether your DNS is being
+hijacked (`dns_check.py`), how fast the LAN itself actually is
+(`lan_throughput.py`), which ports your router's UPnP has quietly opened
+to the internet (`upnp_audit.py`), and a live, glanceable dashboard of
+whatever a scanner's `--watch` loop has already found
+(`network_dashboard.py`).
 
 📄 See [`docs/network_scanner_guide.pdf`](docs/network_scanner_guide.pdf) for a
 printable setup/usage guide with pipeline diagrams and a full options
@@ -572,12 +576,28 @@ conversion, so labeling each honestly beats a false unification. An open/
 unencrypted network is called out in the output as a security nod, the
 same spirit as `RISKY_PORTS` elsewhere in this project.
 
+Each scan is also compared against a small local registry of previously
+seen networks (`~/.cache/wifi_scanner_known_networks.json`) to catch two
+evil-twin/rogue-AP patterns: a familiar SSID suddenly answering with
+*weaker* security than it's ever shown before (a downgrade attack — a
+legitimate AP doesn't just drop encryption on its own), and a familiar
+SSID answering from a BSSID never seen before (a softer signal — could be
+a genuinely new/roaming AP on a mesh network, so it's flagged for a
+second look, not treated as proof). `--no-evil-twin-check` skips this;
+`--forget-known-networks` clears the registry.
+
 **Known limitation, stated plainly:** the parsing for all three platforms
 is verified only against mocked command output matching each tool's
 documented format (see `test_wifi_scanner.py`), not against real Wi-Fi
 hardware on any of the three OSes — the environment this was built in has
 none of `nmcli`/`airport`/`netsh` and no wireless hardware at all. Treat a
-first real run on any platform as the verification it hasn't had yet.
+first real run on any platform as the verification it hasn't had yet. The
+evil-twin logic itself needs no hardware to verify, though, and was run
+for real end to end against a fake `nmcli` script on `PATH`: a baseline
+scan, an unchanged repeat (correctly silent), a simulated downgrade to
+Open on the same BSSID (correctly flagged), and a new BSSID under the
+same SSID (also correctly flagged, as a softer "new access point" signal
+rather than a downgrade).
 
 ## Checking internet-facing exposure (`exposure_check.py`)
 
@@ -683,6 +703,76 @@ unit-tested and needs nothing from scapy at all; the `sniff()` wiring
 around it is verified only by faking out the scapy import in tests, not
 against real ARP traffic on real hardware.
 
+## Watching for a rogue DHCP server (`dhcp_monitor.py`)
+
+A different class of LAN trouble than ARP spoofing: an unauthorized DHCP
+server handing out its own leases alongside (or instead of) your real
+router — a classic attack (hand out a malicious gateway/DNS server to
+every new client), or an equally common accident (a consumer router
+plugged in backwards, its own DHCP server now answering on your LAN).
+Nothing else here would ever notice — a device scan sees who's *on* the
+network, not who's been quietly handing out its addresses.
+
+```
+python dhcp_monitor.py                          # first server seen is the trusted baseline
+python dhcp_monitor.py --trusted-server 192.168.1.1
+python dhcp_monitor.py --log rogue_dhcp.jsonl
+```
+
+Unlike `arp_monitor.py`, this needs no scapy or raw sockets at all —
+DHCPOFFER/DHCPACK replies are ordinary broadcast UDP on port 68 (the
+client port), so an ordinary socket bound there receives them the same
+way a real DHCP client does. It still needs root/administrator, though:
+port 68 is a privileged port regardless of the socket type. The first
+server observed (or any named with `--trusted-server`) is the assumed-good
+baseline; any additional, distinct server after that is flagged —
+`--trusted-server` removes the ambiguity of "first observed" only being
+as trustworthy as whichever server happened to answer first.
+
+Verified more thoroughly than `arp_monitor.py` could manage: the wire-format
+parsing and detection logic are unit-tested with hand-built packets, the
+socket-receive loop is verified end to end against a real, unmocked UDP
+socket on a non-privileged test port, and — since this project's own
+sandbox happens to run as root — the real production path was also run
+for real, against the genuine privileged port 68, correctly ignoring a
+trusted server and flagging an untrusted one. What's still unverified is
+real DHCP traffic from a real, physical network; every packet used above
+was hand-built to match the RFC 2131 wire format, not captured from an
+actual router.
+
+## Checking for DNS hijacking (`dns_check.py`)
+
+Every other tool here assumes DNS answers can be trusted. A compromised
+router, a malicious/free Wi-Fi hotspot, or a captive portal commonly
+intercept DNS and answer with their own IP for domains that should
+NXDOMAIN — redirecting to an ad page, a phishing page, or a "please log
+in" portal before a browser is even opened.
+
+```
+python dns_check.py                       # both checks, default public resolvers
+python dns_check.py --resolver 1.1.1.1 --resolver 9.9.9.9
+python dns_check.py --output dns_check.json
+```
+
+Two checks: the decisive one queries a fresh random hostname under the
+`.invalid` TLD (reserved by RFC 2606 so it can never be a real domain) —
+any answer at all, from your resolver or a public one, means something is
+fabricating NXDOMAIN responses. The softer, caveated one compares
+`example.com` (also RFC 2606-reserved, for stable documentation use)
+across your resolver and a few public ones (Cloudflare, Google, Quad9 by
+default) and flags a mismatch — worth a second look, not proof on its own,
+since a proxying/filtering resolver or a stale cache can also cause this.
+Public resolvers are queried directly with a from-scratch DNS client over
+raw UDP sockets (stdlib only), since `socket.getaddrinfo()` only ever asks
+whatever the OS itself is configured to use.
+
+Verified about as thoroughly as a tool here can be: the wire-format code
+is exercised against a real, unmocked local fake DNS server, and — since
+raw UDP port 53 traffic isn't blocked by this sandbox's outbound proxy the
+way HTTPS is — a real run against the actual Cloudflare/Google/Quad9
+resolvers worked end to end too, correctly returning NXDOMAIN for a fresh
+canary and agreeing on `example.com`'s real answer.
+
 ## Measuring LAN throughput (`lan_throughput.py`)
 
 None of the other tools here measure this at all: "my internet feels
@@ -747,6 +837,47 @@ this script depends on, but it has never spoken to an actual router.
 Router UPnP stacks are inconsistent about spec compliance in ways a
 simulated one won't reproduce; treat a first real run as the verification
 it hasn't had yet.
+
+## A live dashboard for `--watch` (`network_dashboard.py`)
+
+Every scanner here prints to a terminal and moves on — if one is left
+running under `--watch` on an always-on machine, "is anyone home right
+now" otherwise means SSHing back in and reading scrollback. This instead
+serves whatever `--watch` has already persisted to its known-devices
+registry as a small HTML page, glanceable from a phone's browser on the
+same network.
+
+```
+python network_dashboard.py                                  # loopback-only, network_scanner.py's registry
+python network_dashboard.py --bind 0.0.0.0 --token my-secret  # reachable from your phone, minimally gated
+python network_dashboard.py --registry ~/.cache/mobile_network_scanner_known_devices.json
+```
+
+A pure *reader*: it never triggers a scan itself, and needs nothing
+beyond a JSON file and stdlib's `http.server` — no scapy, no subprocess,
+no raw sockets, so unlike almost everything else here, this specific
+script's own operation is fully iOS-sandbox-compatible (though what's
+usually worth pointing it at — a desktop's `--watch` registry — typically
+isn't). Auto-refreshes via a plain `<meta>` tag, no JavaScript at all.
+
+**Security, stated plainly:** your device inventory (IPs, hostnames,
+vendor strings, MACs) isn't public information, and this page has no
+transport encryption and no authentication by default. It defaults to
+`--bind 127.0.0.1` (reachable only from this machine) for exactly that
+reason — reaching it from a phone means explicitly choosing `--bind
+0.0.0.0` (or a LAN address), which then serves that inventory,
+unencrypted, to anyone who can reach the port. `--token` adds a minimal
+shared-secret query check for that case, but it's still plain HTTP — an
+SSH tunnel back to `--bind 127.0.0.1` is the actually-secure way to reach
+this from elsewhere. Every value pulled from the registry is HTML-escaped
+before rendering, since a hostile device could otherwise set a malicious
+hostname designed to inject markup into a page you load from your phone.
+
+Fully verified for real: `render_dashboard_html()` is pure and unit-tested,
+and the actual HTTP server (a real `ThreadingHTTPServer`, hit with a real
+`urllib` GET over real loopback TCP) is exercised end to end for both the
+plain and `--token`-gated paths — nothing here needs privileges, hardware,
+or a real network to verify.
 
 ## Notifications for `--watch`
 

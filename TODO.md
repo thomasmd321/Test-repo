@@ -628,10 +628,37 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       presence sensor in a home automation setup instead of just a
       terminal log.
 
-- [ ] **Local web dashboard.** A small `http.server`-based page showing
+- [x] **Local web dashboard.** A small `http.server`-based page showing
       the live device table, glanceable from a phone browser while
       `--watch` runs on an always-on machine, instead of terminal-only
       output.
+      Done: `network_dashboard.py`, a new standalone script. A pure
+      *reader* of the known-devices registry a scanner's `--watch` loop
+      already persists - never triggers a scan itself, needs nothing
+      beyond `json` + stdlib's `http.server`, so unlike almost everything
+      else here this script's own operation is fully iOS-sandbox-
+      compatible (though what's usually worth pointing it at - a
+      desktop's `--watch` registry - typically isn't). Defaults to
+      `--bind 127.0.0.1` deliberately: your device inventory (IPs,
+      hostnames, vendors, MACs) isn't public information, and this page
+      has no transport encryption and no authentication by default, so
+      reaching it from a phone means explicitly opting into `--bind
+      0.0.0.0`, with `--token` as a minimal (plain-HTTP, so not real
+      security) shared-secret gate for that case - the docstring and
+      README spell out an SSH tunnel back to loopback as the actually-
+      secure alternative. Every registry value is HTML-escaped before
+      rendering (`html.escape()`), since a hostile device could otherwise
+      set a malicious hostname designed to inject markup into a page
+      loaded from a phone - a real stored-XSS risk this project's own
+      security guidance calls out directly. Verified more thoroughly than
+      most tools here can be, since none of it needs privileges, hardware,
+      or a real network: `render_dashboard_html()` is pure and fully
+      unit-tested (staleness thresholds, label/hostname combining, XSS
+      escaping, empty-registry placeholder), and the actual HTTP server -
+      a real `ThreadingHTTPServer`, hit with a real `urllib` GET over real
+      loopback TCP - is exercised end to end for both the plain and
+      `--token`-gated paths, plus a real CLI run confirmed the `--bind
+      0.0.0.0` security warning fires correctly.
 
 - [x] **IPv6 neighbor discovery.** Most ISPs now do dual-stack, so an
       IPv6-only device could go unseen by ARP/ping-based IPv4 scanning.
@@ -716,6 +743,101 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       innermost color - the inner reset was killing the outer color
       partway through the line. Fixed by picking one color per row by
       priority (risky > new > plain) instead of nesting.
+
+- [x] **Rogue DHCP server monitor.** `arp_monitor.py` watches for a
+      different device answering as an already-known IP - a different,
+      equally-unwatched class of LAN trouble is an *unauthorized DHCP
+      server* handing out its own leases alongside (or instead of) the
+      real router: a classic attack, or an equally common accident (a
+      consumer router plugged in backwards). Nothing here would notice -
+      a device scan only sees who's on the network, not who's been
+      quietly handing out its addresses.
+      Done: `dhcp_monitor.py`, a new standalone script. Unlike
+      `arp_monitor.py`, needs no scapy/raw sockets at all -
+      DHCPOFFER/DHCPACK are ordinary broadcast UDP on port 68 (the client
+      port), so an ordinary `SOCK_DGRAM` socket bound there
+      (`SO_REUSEADDR`/`SO_REUSEPORT` shared with whatever DHCP client the
+      OS is already running) receives them the same way a real client
+      does - still needs root/administrator, though, since port 68 is
+      privileged regardless of socket type. The first server observed (or
+      any named via `--trusted-server`, repeatable) is the assumed-good
+      baseline; any additional distinct server is flagged.
+      `parse_dhcp_packet()` implements the BOOTP/DHCP wire format
+      (RFC 2131) from scratch, stdlib only. Verified more thoroughly than
+      `arp_monitor.py` could manage (scapy's `sniff()` has no
+      privilege-free substitute to test against at all): the wire-format
+      parsing and detection logic are pure-function unit-tested with
+      hand-built packets; `monitor()`'s actual socket-receive loop is
+      verified end to end against a real, unmocked UDP socket on a
+      non-privileged test port; and - since this project's own sandbox
+      happens to run as root - the real production path was also run for
+      real, against the genuine privileged port 68, correctly ignoring a
+      trusted server's OFFER and flagging a second, untrusted one,
+      including `--log`'s JSON output. Still unverified: real DHCP
+      traffic from a real, physical network - every packet used above was
+      hand-built to match the RFC, not captured from an actual router.
+
+- [x] **DNS hijack checker.** Every tool here assumes DNS answers can be
+      trusted - a compromised router, a malicious/free Wi-Fi hotspot, or
+      a captive portal commonly intercept DNS and answer with their own
+      IP for domains that should NXDOMAIN, redirecting to an ad/phishing/
+      login page before a browser is even opened. Nothing here would
+      notice at the DNS layer specifically.
+      Done: `dns_check.py`, a new standalone script, two checks. The
+      decisive one queries a fresh random hostname under the `.invalid`
+      TLD (RFC 2606-reserved, can never be a real domain) against the
+      local resolver (via plain `socket.getaddrinfo()`, which naturally
+      asks whatever the OS itself is configured to use) and a small set
+      of public resolvers (Cloudflare/Google/Quad9 by default) - any
+      answer at all for it means something is fabricating NXDOMAIN
+      responses. The softer, caveated one compares `example.com` (also
+      RFC 2606-reserved, for stable documentation use) across the same
+      resolvers and flags a mismatch. Public resolvers are queried
+      directly with a from-scratch DNS client over raw UDP (stdlib only -
+      `_encode_dns_name`/`_decode_dns_name` duplicated from
+      `mobile_network_scanner.py`'s mDNS code, extended with real
+      compression-pointer following in answer records and
+      transaction-ID response validation that the mDNS-only versions
+      didn't need), since `getaddrinfo()` can't target a specific
+      resolver IP. Verified about as thoroughly as a tool here can be:
+      the wire-format code is exercised against a real, unmocked local
+      fake DNS server (including a compressed answer name and a rejected
+      mismatched-transaction-ID reply) - and, unlike this project's
+      HTTPS-based tools (blocked by this sandbox's outbound proxy), raw
+      UDP port 53 isn't proxied here, so a real run against the actual
+      internet-facing Cloudflare/Google/Quad9 resolvers worked end to end
+      too, correctly returning NXDOMAIN for a fresh canary and agreeing
+      on `example.com`'s real answer.
+
+- [x] **Evil-twin / rogue-AP detection** (`wifi_scanner.py`). A scan
+      already sees every nearby SSID/BSSID/security combination - nothing
+      compares one scan to the next, so a familiar network name suddenly
+      showing weaker security (or answering from an unfamiliar access
+      point) goes unnoticed the same way a rogue DHCP server would.
+      Done: a small local registry
+      (`~/.cache/wifi_scanner_known_networks.json`, the same
+      persisted-between-runs spirit as `network_scanner.py`'s
+      known-devices registry) tracking each SSID's every distinct BSSID
+      ever seen and its strongest-ever security level. Two flags:
+      `security_downgrade` (current security ranks below the high-water
+      mark - a legitimate AP doesn't just drop encryption on its own, a
+      classic evil-twin pattern) and the softer `new_bssid` (an unfamiliar
+      access point under a familiar SSID, security unchanged or
+      stronger - could be a legitimate new/roaming AP on a mesh/enterprise
+      network with many APs sharing one SSID, so this is flagged for a
+      second look rather than treated as proof). `_security_rank()`
+      matches by substring (strongest first: wpa3/wpa2/wpa/wep/else) since
+      real tool output varies too much across platforms/versions for an
+      exact vocabulary (nmcli's "WPA2 802.1X" vs. airport's
+      "WPA2(PSK/AES/AES)" vs. netsh's "WPA2-Personal"). `--no-evil-twin-check`
+      skips it; `--forget-known-networks` clears the registry. Needs no
+      hardware to verify (plain dicts in, plain dicts out) and was also
+      run for real end to end against a fake `nmcli` script on `PATH`: a
+      baseline WPA2 scan, an unchanged repeat (correctly silent), a
+      simulated downgrade to Open on the same BSSID (correctly flagged),
+      and a new BSSID under the same SSID (correctly flagged as the
+      softer `new_bssid` signal, not a downgrade, since security itself
+      hadn't weakened).
 
 ## `mobile_network_scanner.py`-specific
 
