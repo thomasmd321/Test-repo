@@ -452,6 +452,46 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       end via the actual CLI, confirming both sides agree on the exact
       byte count transferred.
 
+- [x] **UPnP/IGD port-mapping auditor.** `exposure_check.py` answers "is
+      this port reachable from outside" after the fact, by probing your
+      public IP - a sharper, earlier question is *why* it might be open
+      at all. Many home routers ship with UPnP enabled, letting any
+      device on the network ask the router to forward a port from the
+      internet straight to itself, with no further confirmation and no
+      trace visible from LAN-side scanning at all.
+      Done: `upnp_audit.py`, a new standalone script implementing the
+      three-step UPnP IGD protocol from scratch (stdlib only - `socket`,
+      `urllib`, `xml.etree.ElementTree`): SSDP multicast discovery
+      (`discover_gateway()`, an M-SEARCH query to 239.255.255.250:1900 -
+      the same request/response shape mDNS/DNS-SD's own discovery is
+      built on, an older HTTP-header-flavored sibling protocol) to find
+      the router's device-description URL; walking that XML
+      (`find_wan_service()`, via `.iter()` rather than assuming any fixed
+      nesting depth, since routers vary here) to find its
+      WANIPConnection/WANPPPConnection service; then calling that
+      service's `GetGenericPortMappingEntry` SOAP action once per index
+      until the router's normal "no more entries" fault ends the
+      enumeration (`get_port_mappings()`). A mapping forwarding a port
+      already on `RISKY_PORTS` (duplicated from the scanners, same
+      convention as `exposure_check.py`) is called out specifically.
+      Verified end-to-end against a real, fully unmocked simulated
+      gateway: a genuine SSDP responder thread (real multicast sockets,
+      the same loopback-multicast capability confirmed working during
+      `mdns_browser.py`'s development) plus a genuine `HTTPServer`
+      serving real XML device-description and SOAP response/fault
+      bodies - `discover_gateway()`, `get_device_description()`,
+      `find_wan_service()`, `get_port_mappings()`, and the full `audit()`
+      orchestration were all run for real against this simulated router
+      and produced the exact expected port-mapping result, end to end,
+      with zero mocks anywhere in that chain. This project's own
+      environment has no real UPnP gateway to test against, though, so
+      the simulated-router verification (kept as manual verification, not
+      part of the committed suite, for the same reason `mdns_browser.py`'s
+      real multicast test wasn't committed either: real multicast/SSDP
+      behavior isn't guaranteed consistent across every CI runner) is the
+      strongest confidence available here - a real router's UPnP stack
+      could still diverge from the spec in ways this hasn't seen.
+
 - [x] **Scan-diff tool.** A natural complement to CSV/JSON export above:
       compare two saved scans and report what changed between them
       (devices added/removed, per-field changes on ones present in

@@ -1040,6 +1040,50 @@ python3 lan_throughput.py --client 192.168.1.50 --duration 10"""))
         "iperf3 does - treat it as a quick, no-install sanity check, not a substitute for iperf3 when "
         "a rigorous number is needed.", styles["Body"]))
 
+    story.append(PageBreak())
+
+    # ------------------------------------------------------------ upnp_audit.py
+    story.append(Paragraph("18. upnp_audit.py: UPnP port audit", styles["H1"]))
+    story.append(Paragraph(
+        "exposure_check.py answers “is this port reachable from outside” after the fact, by "
+        "probing your public IP. This answers a sharper, earlier question: why a port might be open "
+        "at all, even though nothing in a LAN scan looks unusual. Many home routers ship with UPnP "
+        "enabled, letting any device on the network ask the router to forward a port from the "
+        "internet straight to itself - a game console, a BitTorrent client, a smart-home hub - with "
+        "no further confirmation and no trace visible from LAN-side scanning at all. This queries the "
+        "router itself for its current UPnP port-mapping table.", styles["Body"]))
+    story.append(code_block("""python3 upnp_audit.py
+python3 upnp_audit.py --timeout 5
+python3 upnp_audit.py --output mappings.json"""))
+    story.append(Paragraph(
+        "Works in three steps: SSDP multicast discovery finds the router's UPnP Internet Gateway "
+        "Device (the same request/response shape mDNS/DNS-SD's own discovery is built on, an older "
+        "HTTP-header-flavored sibling protocol); its XML device description is fetched and walked - "
+        "regardless of nesting depth, since routers vary here - to find the WANIPConnection or "
+        "WANPPPConnection service that actually manages port forwarding; then that service's "
+        "GetGenericPortMappingEntry SOAP action is called once per index until the router reports "
+        "there are no more. A mapping forwarding a port already on RISKY_PORTS is called out "
+        "specifically.", styles["Body"]))
+
+    warn_data6 = [[Paragraph(
+        "<b>Known limitation, stated plainly:</b> this project's own development environment has no "
+        "reachable UPnP Internet Gateway Device. The full SSDP -&gt; XML -&gt; SOAP pipeline is "
+        "verified against a real, unmocked gateway simulated locally - a genuine SSDP responder plus "
+        "a genuine HTTP server serving real XML/SOAP bodies, all over real sockets - which exercises "
+        "every wire-format detail this script depends on, but it has never spoken to an actual "
+        "router. Router UPnP stacks are inconsistent about spec compliance in ways a simulated one "
+        "won't reproduce; treat a first real run as the verification it hasn't had yet.", styles["Body"]
+    )]]
+    warn_table6 = Table(warn_data6, colWidths=[6.4 * inch])
+    warn_table6.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fff6e5")),
+        ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#e0a940")),
+        ("TOPPADDING", (0, 0), (-1, -1), 10), ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10), ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(Spacer(1, 0.1 * inch))
+    story.append(warn_table6)
+
     doc = SimpleDocTemplate(
         str(out_path),
         pagesize=letter,

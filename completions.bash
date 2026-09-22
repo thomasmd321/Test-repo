@@ -1,6 +1,7 @@
 # Bash tab-completion for network_scanner.py, mobile_network_scanner.py,
 # scan_diff.py, mdns_browser.py, wifi_scanner.py, exposure_check.py,
-# traceroute_mapper.py, arp_monitor.py, and lan_throughput.py.
+# traceroute_mapper.py, arp_monitor.py, lan_throughput.py, and
+# upnp_audit.py.
 #
 # Usage: source this file, e.g. from ~/.bashrc:
 #   source /path/to/Test-repo/completions.bash
@@ -95,3 +96,10 @@ _lan_throughput_completions() {
     COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
 }
 complete -F _lan_throughput_completions lan_throughput.py
+
+_upnp_audit_completions() {
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local opts="-h --help --timeout --output --no-color"
+    COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+complete -F _upnp_audit_completions upnp_audit.py
