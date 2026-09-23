@@ -758,24 +758,30 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       port), so an ordinary `SOCK_DGRAM` socket bound there
       (`SO_REUSEADDR`/`SO_REUSEPORT` shared with whatever DHCP client the
       OS is already running) receives them the same way a real client
-      does - still needs root/administrator, though, since port 68 is
-      privileged regardless of socket type. The first server observed (or
-      any named via `--trusted-server`, repeatable) is the assumed-good
-      baseline; any additional distinct server is flagged.
-      `parse_dhcp_packet()` implements the BOOTP/DHCP wire format
-      (RFC 2131) from scratch, stdlib only. Verified more thoroughly than
-      `arp_monitor.py` could manage (scapy's `sniff()` has no
-      privilege-free substitute to test against at all): the wire-format
-      parsing and detection logic are pure-function unit-tested with
-      hand-built packets; `monitor()`'s actual socket-receive loop is
-      verified end to end against a real, unmocked UDP socket on a
-      non-privileged test port; and - since this project's own sandbox
-      happens to run as root - the real production path was also run for
-      real, against the genuine privileged port 68, correctly ignoring a
-      trusted server's OFFER and flagging a second, untrusted one,
-      including `--log`'s JSON output. Still unverified: real DHCP
-      traffic from a real, physical network - every packet used above was
-      hand-built to match the RFC, not captured from an actual router.
+      does - on Linux/macOS this still needs root, since port 68 is
+      privileged there regardless of socket type; Windows doesn't gate
+      sub-1024 ports on administrator status the same way, but that's not
+      the same as "just works" - it would be sharing port 68 with
+      Windows' own DHCP Client service, and Windows' looser
+      `SO_REUSEADDR` semantics leave whether that bind actually succeeds
+      genuinely untested. The first server observed (or any named via
+      `--trusted-server`, repeatable) is the assumed-good baseline; any
+      additional distinct server is flagged. `parse_dhcp_packet()`
+      implements the BOOTP/DHCP wire format (RFC 2131) from scratch,
+      stdlib only. Verified more thoroughly than `arp_monitor.py` could
+      manage (scapy's `sniff()` has no privilege-free substitute to test
+      against at all): the wire-format parsing and detection logic are
+      pure-function unit-tested with hand-built packets; `monitor()`'s
+      actual socket-receive loop is verified end to end against a real,
+      unmocked UDP socket on a non-privileged test port; and - since this
+      project's own sandbox happens to run as root on Linux - the real
+      production path was also run for real there, against the genuine
+      privileged port 68, correctly ignoring a trusted server's OFFER and
+      flagging a second, untrusted one, including `--log`'s JSON output.
+      Still unverified: real DHCP traffic from a real, physical network -
+      every packet used above was hand-built to match the RFC, not
+      captured from an actual router - and the entire Windows path,
+      including whether the port-68 bind even succeeds there.
 
 - [x] **DNS hijack checker.** Every tool here assumes DNS answers can be
       trusted - a compromised router, a malicious/free Wi-Fi hotspot, or

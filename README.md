@@ -722,23 +722,30 @@ python dhcp_monitor.py --log rogue_dhcp.jsonl
 Unlike `arp_monitor.py`, this needs no scapy or raw sockets at all —
 DHCPOFFER/DHCPACK replies are ordinary broadcast UDP on port 68 (the
 client port), so an ordinary socket bound there receives them the same
-way a real DHCP client does. It still needs root/administrator, though:
-port 68 is a privileged port regardless of the socket type. The first
-server observed (or any named with `--trusted-server`) is the assumed-good
-baseline; any additional, distinct server after that is flagged —
-`--trusted-server` removes the ambiguity of "first observed" only being
-as trustworthy as whichever server happened to answer first.
+way a real DHCP client does. On Linux/macOS this still needs root: port
+68 is a privileged port there regardless of socket type. Windows doesn't
+gate ports under 1024 on administrator status the same way, but that's
+not the same as "just works" there — it'd be sharing port 68 with
+Windows' own DHCP Client service, and Windows' looser `SO_REUSEADDR`
+semantics make whether that bind actually succeeds genuinely untested
+rather than assumed fine. The first server observed (or any named with
+`--trusted-server`) is the assumed-good baseline; any additional, distinct
+server after that is flagged — `--trusted-server` removes the ambiguity
+of "first observed" only being as trustworthy as whichever server
+happened to answer first.
 
 Verified more thoroughly than `arp_monitor.py` could manage: the wire-format
 parsing and detection logic are unit-tested with hand-built packets, the
 socket-receive loop is verified end to end against a real, unmocked UDP
 socket on a non-privileged test port, and — since this project's own
-sandbox happens to run as root — the real production path was also run
-for real, against the genuine privileged port 68, correctly ignoring a
-trusted server and flagging an untrusted one. What's still unverified is
-real DHCP traffic from a real, physical network; every packet used above
-was hand-built to match the RFC 2131 wire format, not captured from an
-actual router.
+sandbox happens to run as root on Linux — the real production path was
+also run for real there, against the genuine privileged port 68,
+correctly ignoring a trusted server and flagging an untrusted one. What's
+still unverified is real DHCP traffic from a real, physical network
+(every packet used above was hand-built to match the RFC 2131 wire
+format, not captured from an actual router), and the entire Windows path,
+including whether the port-68 bind even succeeds there alongside the
+built-in DHCP Client service.
 
 ## Checking for DNS hijacking (`dns_check.py`)
 

@@ -17,10 +17,15 @@ server's OFFER/ACK replies are ordinary broadcast UDP packets sent to port
 68 (the client port) - an ordinary SOCK_DGRAM socket bound there receives
 them the same way a real DHCP client does, sharing that port with
 whatever DHCP client this OS is already running via
-SO_REUSEADDR/SO_REUSEPORT. It still needs root/administrator, though: port
-68 is a privileged (<1024) port on every platform this targets, regardless
-of the socket type - that requirement doesn't go away just because this
-avoids scapy.
+SO_REUSEADDR/SO_REUSEPORT. On Linux/macOS this still needs root: port 68
+is a privileged (<1024) port there regardless of socket type, so avoiding
+scapy doesn't avoid that requirement. Windows doesn't enforce the same
+restriction - it doesn't require administrator to bind a port under 1024
+the way POSIX does - but that's not the same as "just works" there: this
+would be sharing port 68 with Windows' own DHCP Client service, and
+Windows' SO_REUSEADDR has looser (and historically security-relevant)
+semantics than POSIX's, so whether that bind actually succeeds, and what
+it receives if it does, is genuinely untested rather than assumed fine.
 
 Detection logic: the first DHCP server observed this session (or any
 IP(s) named with --trusted-server) is treated as the known-good baseline;
@@ -207,8 +212,11 @@ def monitor(
 
     Raises:
         PermissionError / OSError: this process lacks permission to bind
-            the requested port (typically the real port 68, which needs
-            root/administrator on every platform this targets).
+            the requested port - typically the real port 68, which needs
+            root on Linux/macOS (Windows doesn't gate ports under 1024 on
+            administrator status the same way, though see this module's
+            docstring for why that doesn't mean the bind is guaranteed to
+            succeed there either).
 
     This call never returns on its own - it listens until interrupted
     (Ctrl+C in production; a closed/timed-out socket in a test), the same
@@ -320,7 +328,7 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopped.")
     except PermissionError as exc:
-        print(f"Error: couldn't bind to port {_DHCP_CLIENT_PORT} ({exc}) - this needs root/administrator privileges (DHCP's client port is a privileged port)")
+        print(f"Error: couldn't bind to port {_DHCP_CLIENT_PORT} ({exc}) - on Linux/macOS this needs root, since DHCP's client port is privileged there")
         raise SystemExit(1)
     except OSError as exc:
         print(f"Error: {exc}")
