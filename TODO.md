@@ -845,6 +845,37 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       softer `new_bssid` signal, not a downgrade, since security itself
       hadn't weakened).
 
+- [x] **ARP/DHCP watching without admin rights, for Windows.**
+      `arp_monitor.py` and `network_scanner.py`'s ARP scan both need
+      scapy plus raw-socket privileges (root/administrator, plus Npcap on
+      Windows specifically) - unrealistic on a locked-down/managed
+      Windows machine. Windows already tracks its own ARP cache and DHCP
+      lease info via plain, unprivileged commands, though.
+      Done: `windows_arp_dhcp_watch.py`, a new standalone script, polling
+      `arp -a` and `ipconfig /all` instead of sniffing packets. Two
+      checks: ARP cache diffing (`process_arp_observation()` duplicated
+      verbatim from `arp_monitor.py` - identical algorithm, just sourced
+      from polled snapshots instead of live packets) and DHCP-server-per-
+      adapter diffing (`find_dhcp_server_changes()` - a different vantage
+      point than `dhcp_monitor.py`'s passive sniffing: asks Windows
+      itself, per adapter, which DHCP server *it* actually got its own
+      lease from, parsed from `ipconfig /all`). Windows-only by design -
+      `ipconfig /all`'s DHCP-lease fields have no equivalent on
+      Linux/macOS here, same kind of deliberate platform split as
+      `wifi_scanner.py`/`traceroute_mapper.py`. This project's own
+      sandbox is Linux with no real Windows machine, so every parsing/
+      diffing function is unit-tested against hand-built output, and the
+      full subprocess -> parse -> diff pipeline was also run for real
+      (`platform.system()` patched to report "Windows", real fake
+      `arp`/`ipconfig` scripts on `PATH` so `subprocess.run()` genuinely
+      executes something) - which caught and fixed a real regex bug
+      before it shipped: a naive `\s*\.*\s*` can't match `ipconfig /all`'s
+      *alternating* space-dot-space-dot padding before each field's
+      colon (it only allows one block of whitespace then one block of
+      dots), fixed with a single `[\s.]*` character class instead. Still
+      unverified: the real `arp.exe`/`ipconfig.exe` on an actual Windows
+      install.
+
 ## `mobile_network_scanner.py`-specific
 
 Several of the ideas above only got built for `network_scanner.py`. Most

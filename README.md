@@ -11,9 +11,11 @@ IP right now (`arp_monitor.py`), whether an unauthorized DHCP server is
 handing out its own leases (`dhcp_monitor.py`), whether your DNS is being
 hijacked (`dns_check.py`), how fast the LAN itself actually is
 (`lan_throughput.py`), which ports your router's UPnP has quietly opened
-to the internet (`upnp_audit.py`), and a live, glanceable dashboard of
+to the internet (`upnp_audit.py`), a live, glanceable dashboard of
 whatever a scanner's `--watch` loop has already found
-(`network_dashboard.py`).
+(`network_dashboard.py`), and the same ARP/DHCP watching as above but
+using nothing but Windows' own commands, no scapy or admin rights needed
+(`windows_arp_dhcp_watch.py`).
 
 📄 See [`docs/network_scanner_guide.pdf`](docs/network_scanner_guide.pdf) for a
 printable setup/usage guide with pipeline diagrams and a full options
@@ -779,6 +781,47 @@ raw UDP port 53 traffic isn't blocked by this sandbox's outbound proxy the
 way HTTPS is — a real run against the actual Cloudflare/Google/Quad9
 resolvers worked end to end too, correctly returning NXDOMAIN for a fresh
 canary and agreeing on `example.com`'s real answer.
+
+## ARP/DHCP watching without admin rights (`windows_arp_dhcp_watch.py`)
+
+`arp_monitor.py` and `network_scanner.py`'s ARP scan both need scapy plus
+raw-socket privileges — root/administrator, plus Npcap on Windows
+specifically — to sniff or send ARP packets directly. But Windows already
+maintains its own ARP cache and DHCP lease records, readable through two
+ordinary, unprivileged commands every Windows install ships with: `arp -a`
+and `ipconfig /all`. This polls both periodically instead of sniffing
+packets, on a locked-down/managed Windows machine where installing Npcap
+or getting administrator rights isn't realistic.
+
+```
+python windows_arp_dhcp_watch.py
+python windows_arp_dhcp_watch.py --interval 10 --log alerts.jsonl
+```
+
+Two independent checks each poll: ARP cache diffing (the identical signal
+`arp_monitor.py`'s own detection logic catches — an IP answering from an
+unfamiliar MAC — just sourced from `arp -a` snapshots instead of live
+sniffed packets, trading "catches it instantly" for "catches it within one
+poll interval, no setup burden"), and DHCP-server-per-adapter diffing — a
+different vantage point than `dhcp_monitor.py`'s passive sniffing: instead
+of watching the wire for any server's broadcasts, this asks Windows
+itself, per adapter, which DHCP server *it* actually got its own lease
+from, and flags when that answer changes. Windows-only by design —
+`ipconfig /all`'s DHCP-lease fields have no equivalent on Linux/macOS in
+this project.
+
+**Known limitation, stated plainly:** this project's own development
+environment is Linux, with no real Windows machine to run this against —
+genuinely untestable end to end the way most tools here manage. Every
+parsing/diffing function is unit-tested against hand-built output matching
+each command's documented format, and the full subprocess → parse → diff
+pipeline was run for real (`platform.system()` patched to report
+"Windows", with real fake `arp`/`ipconfig` scripts on PATH so
+`subprocess.run()` genuinely executes something) — which caught and fixed
+a real regex bug before it shipped (a naive `\s*\.*\s*` can't match
+`ipconfig /all`'s alternating space-dot-space-dot padding before each
+field's colon) — but the real `arp.exe`/`ipconfig.exe` on an actual
+Windows install, and their real output format, remain unverified.
 
 ## Measuring LAN throughput (`lan_throughput.py`)
 
