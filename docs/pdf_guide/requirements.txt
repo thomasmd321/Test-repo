@@ -1,0 +1,6 @@
+# Dependencies for docs/pdf_guide/generate_guide.py only - the scanner
+# scripts themselves have no dependencies beyond the standard library (and
+# optionally scapy/psutil, per their own docstrings).
+reportlab>=4.0
+matplotlib>=3.7
+Pillow>=10.0
