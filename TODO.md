@@ -851,7 +851,7 @@ Ideas discussed but not yet implemented, for `network_scanner.py` and
       Windows specifically) - unrealistic on a locked-down/managed
       Windows machine. Windows already tracks its own ARP cache and DHCP
       lease info via plain, unprivileged commands, though.
-      Done: `windows_arp_dhcp_watch.py`, a new standalone script, polling
+      Done: `win_arp_dhcp_watch.py`, a new standalone script, polling
       `arp -a` and `ipconfig /all` instead of sniffing packets. Two
       checks: ARP cache diffing (`process_arp_observation()` duplicated
       verbatim from `arp_monitor.py` - identical algorithm, just sourced

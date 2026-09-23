@@ -15,7 +15,7 @@ to the internet (`upnp_audit.py`), a live, glanceable dashboard of
 whatever a scanner's `--watch` loop has already found
 (`network_dashboard.py`), and the same ARP/DHCP watching as above but
 using nothing but Windows' own commands, no scapy or admin rights needed
-(`windows_arp_dhcp_watch.py`).
+(`win_arp_dhcp_watch.py`).
 
 📄 See [`docs/network_scanner_guide.pdf`](docs/network_scanner_guide.pdf) for a
 printable setup/usage guide with pipeline diagrams and a full options
@@ -782,7 +782,7 @@ way HTTPS is — a real run against the actual Cloudflare/Google/Quad9
 resolvers worked end to end too, correctly returning NXDOMAIN for a fresh
 canary and agreeing on `example.com`'s real answer.
 
-## ARP/DHCP watching without admin rights (`windows_arp_dhcp_watch.py`)
+## ARP/DHCP watching without admin rights (`win_arp_dhcp_watch.py`)
 
 `arp_monitor.py` and `network_scanner.py`'s ARP scan both need scapy plus
 raw-socket privileges — root/administrator, plus Npcap on Windows
@@ -794,8 +794,8 @@ packets, on a locked-down/managed Windows machine where installing Npcap
 or getting administrator rights isn't realistic.
 
 ```
-python windows_arp_dhcp_watch.py
-python windows_arp_dhcp_watch.py --interval 10 --log alerts.jsonl
+python win_arp_dhcp_watch.py
+python win_arp_dhcp_watch.py --interval 10 --log alerts.jsonl
 ```
 
 Two independent checks each poll: ARP cache diffing (the identical signal

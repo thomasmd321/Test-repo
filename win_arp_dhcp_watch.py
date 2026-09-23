@@ -44,9 +44,9 @@ split elsewhere here. Running this on another OS prints a clear error
 and exits rather than attempting a partial/wrong-format parse.
 
 Usage:
-    python windows_arp_dhcp_watch.py
-    python windows_arp_dhcp_watch.py --interval 10 --log alerts.jsonl
-    python windows_arp_dhcp_watch.py --no-color
+    python win_arp_dhcp_watch.py
+    python win_arp_dhcp_watch.py --interval 10 --log alerts.jsonl
+    python win_arp_dhcp_watch.py --no-color
 
 Known limitation, stated plainly: this project's own development sandbox
 is Linux, with no real Windows machine to run this against - genuinely

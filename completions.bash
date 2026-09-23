@@ -2,7 +2,7 @@
 # scan_diff.py, mdns_browser.py, wifi_scanner.py, exposure_check.py,
 # traceroute_mapper.py, arp_monitor.py, lan_throughput.py, upnp_audit.py,
 # dhcp_monitor.py, dns_check.py, network_dashboard.py, and
-# windows_arp_dhcp_watch.py.
+# win_arp_dhcp_watch.py.
 #
 # Usage: source this file, e.g. from ~/.bashrc:
 #   source /path/to/Test-repo/completions.bash
@@ -126,9 +126,9 @@ _network_dashboard_completions() {
 }
 complete -F _network_dashboard_completions network_dashboard.py
 
-_windows_arp_dhcp_watch_completions() {
+_win_arp_dhcp_watch_completions() {
     local cur="${COMP_WORDS[COMP_CWORD]}"
     local opts="-h --help --interval --log --no-color"
     COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
 }
-complete -F _windows_arp_dhcp_watch_completions windows_arp_dhcp_watch.py
+complete -F _win_arp_dhcp_watch_completions win_arp_dhcp_watch.py

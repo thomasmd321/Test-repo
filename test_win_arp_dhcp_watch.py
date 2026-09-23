@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import windows_arp_dhcp_watch as wadw
+import win_arp_dhcp_watch as wadw
 
 _ARP_A_OUTPUT = """
 Interface: 192.168.1.5 --- 0xb
@@ -191,44 +191,44 @@ class TestFindDhcpServerChanges:
 
 class TestGetArpTable:
     def test_parses_real_subprocess_output(self):
-        with patch("windows_arp_dhcp_watch.subprocess.run", return_value=MagicMock(stdout=_ARP_A_OUTPUT)):
+        with patch("win_arp_dhcp_watch.subprocess.run", return_value=MagicMock(stdout=_ARP_A_OUTPUT)):
             table = wadw.get_arp_table()
 
         assert table["192.168.1.1"] == "aa:bb:cc:dd:ee:ff"
 
     def test_raises_clear_error_when_arp_missing(self):
-        with patch("windows_arp_dhcp_watch.subprocess.run", side_effect=FileNotFoundError):
+        with patch("win_arp_dhcp_watch.subprocess.run", side_effect=FileNotFoundError):
             with pytest.raises(RuntimeError, match="not found"):
                 wadw.get_arp_table()
 
     def test_raises_clear_error_on_timeout(self):
-        with patch("windows_arp_dhcp_watch.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="arp", timeout=5)):
+        with patch("win_arp_dhcp_watch.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="arp", timeout=5)):
             with pytest.raises(RuntimeError, match="did not respond"):
                 wadw.get_arp_table()
 
 
 class TestGetIpconfigAll:
     def test_parses_real_subprocess_output(self):
-        with patch("windows_arp_dhcp_watch.subprocess.run", return_value=MagicMock(stdout=_IPCONFIG_ALL_OUTPUT)):
+        with patch("win_arp_dhcp_watch.subprocess.run", return_value=MagicMock(stdout=_IPCONFIG_ALL_OUTPUT)):
             adapters = wadw.get_ipconfig_all()
 
         assert adapters["Ethernet adapter Ethernet"]["dhcp_server"] == "192.168.1.1"
 
     def test_raises_clear_error_when_ipconfig_missing(self):
-        with patch("windows_arp_dhcp_watch.subprocess.run", side_effect=FileNotFoundError):
+        with patch("win_arp_dhcp_watch.subprocess.run", side_effect=FileNotFoundError):
             with pytest.raises(RuntimeError, match="not found"):
                 wadw.get_ipconfig_all()
 
     def test_raises_clear_error_on_timeout(self):
-        with patch("windows_arp_dhcp_watch.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ipconfig", timeout=5)):
+        with patch("win_arp_dhcp_watch.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="ipconfig", timeout=5)):
             with pytest.raises(RuntimeError, match="did not respond"):
                 wadw.get_ipconfig_all()
 
 
 class TestMainPlatformGate:
     def test_exits_cleanly_on_a_non_windows_platform(self, capsys):
-        with patch("windows_arp_dhcp_watch.platform.system", return_value="Linux"), \
-             patch.object(sys, "argv", ["windows_arp_dhcp_watch.py"]):
+        with patch("win_arp_dhcp_watch.platform.system", return_value="Linux"), \
+             patch.object(sys, "argv", ["win_arp_dhcp_watch.py"]):
             with pytest.raises(SystemExit) as excinfo:
                 wadw.main()
 
@@ -327,7 +327,7 @@ class TestRealSubprocessEndToEnd:
         self._write_fake_binaries(tmp_path, _ARP_A_OUTPUT, _IPCONFIG_ALL_OUTPUT)
         monkeypatch.setenv("PATH", f"{tmp_path}:{__import__('os').environ['PATH']}")
 
-        with patch("windows_arp_dhcp_watch.platform.system", return_value="Windows"):
+        with patch("win_arp_dhcp_watch.platform.system", return_value="Windows"):
             # main() itself loops forever, so this exercises the same
             # real subprocess calls main() would make, without invoking
             # its infinite loop.
