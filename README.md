@@ -131,3 +131,37 @@ switch, or a router that supports OpenWrt/DD-WRT.
 ```
 pip install scapy pynetgear rich
 ```
+
+## arp_spoof_detector.py
+
+Passively watches ARP replies on a local interface and alerts when something
+looks like ARP cache poisoning (the technique behind "NetCut"-style LAN
+disconnect tools) — either an IP's claimed MAC address changing faster than
+a real device would ("flapping"), or a reply contradicting a mapping you've
+explicitly told it to trust ("pinned"). It never sends, forges, or blocks
+any traffic; it only reads and reports.
+
+```
+sudo python arp_spoof_detector.py                  # auto-pick interface
+sudo python arp_spoof_detector.py --interface eth0
+sudo python arp_spoof_detector.py --flap-window 10 --pin 192.168.1.1=aa:bb:cc:11:22:33
+
+# Repair a poisoned entry without sniffing, e.g. after an alert:
+python arp_spoof_detector.py --repair 192.168.1.1=aa:bb:cc:11:22:33
+```
+
+`--repair` dispatches to the OS's own static-ARP command (`arp -s` on
+Linux/macOS, `netsh` on Windows — see `--windows-interface` for the adapter
+name Windows needs) so the corrected mapping can't be silently overwritten
+again.
+
+| Flag | Description |
+| --- | --- |
+| `--interface IFACE` | Interface to watch (default: scapy's default) |
+| `--flap-window SECONDS` | How fast a MAC change is treated as suspicious (default: 10) |
+| `--pin IP=MAC` | A mapping to enforce; repeatable |
+| `--repair IP=MAC` | Pin one mapping via the OS static-ARP command and exit |
+| `--windows-interface NAME` | [Windows only] adapter name for `--repair` (default: `Ethernet`) |
+
+Requires `scapy` for watching traffic; `--repair` alone has no dependencies.
+Sniffing raw packets typically requires root/administrator privileges.
