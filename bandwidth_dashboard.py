@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live per-device bandwidth dashboard for your local network.
 
-Two data sources, picked with --source:
+Three data sources, picked with --source:
 
   sniff (default) -- passively sniffs traffic on a local network
     interface with scapy. On a typical switched network an ordinary
@@ -24,23 +24,38 @@ Two data sources, picked with --source:
     -- fine for a live "who's using bandwidth right now" view, not for
     exact totals.
 
-Neither mode alters, redirects, or throttles anyone's connection --
-both only observe.
+  netgear -- for stock Netgear firmware (e.g. Nighthawk/Orbi), which
+    doesn't run Linux userspace tools and has no documented per-device
+    bandwidth API. Uses pynetgear to poll the router's local SOAP API
+    (the same one the Nighthawk app uses) for the attached-devices
+    list and the router-WIDE traffic meter. Important: this does NOT
+    give true per-device live throughput -- "Link Rate" is each
+    device's negotiated WiFi PHY speed (a ceiling, not actual usage),
+    and the traffic meter is a whole-router today/month total, not
+    broken out per device. Treat this as "who's connected and how
+    fast is their link" rather than "who's using bandwidth right now".
+    Requires the Traffic Meter to be enabled in the router's web UI
+    (Advanced > Setup > Traffic Meter) for the totals to populate.
 
-Requires scapy for --source sniff, and (for either source) the
-optional `rich` package for the live table; without `rich` it falls
-back to a plain periodic text summary. Sniffing raw packets typically
-requires root/administrator privileges.
+Neither sniff nor conntrack alters, redirects, or throttles anyone's
+connection -- both only observe. netgear only reads router status.
+
+Requires scapy for --source sniff, pynetgear for --source netgear,
+and (for any source) the optional `rich` package for the live table;
+without `rich` it falls back to a plain periodic text summary.
+Sniffing raw packets typically requires root/administrator privileges.
 
 Usage:
     sudo python bandwidth_dashboard.py                          # sniff, auto-pick interface
     sudo python bandwidth_dashboard.py --interface eth0
     python bandwidth_dashboard.py --source conntrack             # running on the router itself
     python bandwidth_dashboard.py --source conntrack --host root@192.168.1.1
+    NETGEAR_PASSWORD=... python bandwidth_dashboard.py --source netgear --netgear-host routerlogin.net
 """
 
 import argparse
 import ipaddress
+import os
 import socket
 import subprocess
 import threading
@@ -51,6 +66,11 @@ try:
     from scapy.all import conf, sniff
 except ImportError:
     conf = None
+
+try:
+    from pynetgear import Netgear
+except ImportError:
+    Netgear = None
 
 try:
     from rich.console import Console
@@ -250,18 +270,108 @@ def run_conntrack_source(args, stats: Stats):
     return poll
 
 
+def _link_rate_mbps(device) -> float:
+    try:
+        return float(device.link_rate)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def build_netgear_table(devices: list, traffic_meter: dict):
+    """Render an attached-devices snapshot (link rate, not live throughput)."""
+    devices = sorted(devices, key=_link_rate_mbps, reverse=True)
+    meter_line = (
+        f"Router traffic meter -- today: {traffic_meter.get('NewTodayUpload', '?')} MB up / "
+        f"{traffic_meter.get('NewTodayDownload', '?')} MB down, "
+        f"this month: {traffic_meter.get('NewMonthUpload', '?')} MB up / "
+        f"{traffic_meter.get('NewMonthDownload', '?')} MB down"
+        if traffic_meter
+        else "Router traffic meter: unavailable (enable it under Advanced > Setup > Traffic Meter)"
+    )
+
+    if HAVE_RICH:
+        table = Table(title="Attached devices (link rate is a ceiling, not live usage)")
+        table.add_column("IP")
+        table.add_column("Name")
+        table.add_column("MAC")
+        table.add_column("Band")
+        table.add_column("Link Rate", justify="right")
+        for d in devices:
+            table.add_row(d.ip or "-", d.name or "-", d.mac or "-", d.ssid or "-", f"{d.link_rate} Mbps" if d.link_rate else "-")
+        return table, meter_line
+
+    lines = ["\nAttached devices (link rate is a ceiling, not live usage)", "-" * 72]
+    lines.append(f"{'IP':<16}{'Name':<20}{'MAC':<20}{'Band':<10}Link Rate")
+    for d in devices:
+        rate = f"{d.link_rate} Mbps" if d.link_rate else "-"
+        lines.append(f"{(d.ip or '-'):<16}{(d.name or '-'):<20}{(d.mac or '-'):<20}{(d.ssid or '-'):<10}{rate}")
+    if not devices:
+        lines.append("(no devices reported)")
+    return "\n".join(lines), meter_line
+
+
+def run_netgear_source(args):
+    if Netgear is None:
+        raise SystemExit("--source netgear requires pynetgear: pip install pynetgear")
+
+    password = os.environ.get("NETGEAR_PASSWORD")
+    if not password:
+        raise SystemExit("Set the NETGEAR_PASSWORD environment variable to your router admin password.")
+
+    router = Netgear(password=password, user=args.netgear_user, host=args.netgear_host)
+    if not router.login():
+        raise SystemExit(f"Failed to log in to {args.netgear_host} as {args.netgear_user}. Check host/credentials.")
+
+    print(f"Polling {args.netgear_host} every {args.interval}s ... Ctrl+C to stop.")
+    print(
+        "Note: stock Netgear firmware exposes attached-device link rate and a\n"
+        "whole-router traffic meter, not true per-device live bandwidth.\n"
+    )
+
+    def poll():
+        time.sleep(args.interval)
+        devices = router.get_attached_devices_2() or []
+        traffic_meter = router.get_traffic_meter() or {}
+        return devices, traffic_meter
+
+    return poll
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--source", choices=("sniff", "conntrack"), default="sniff", help="Data source (default: sniff)")
+    parser.add_argument("--source", choices=("sniff", "conntrack", "netgear"), default="sniff", help="Data source (default: sniff)")
     parser.add_argument("--interface", help="[sniff] Network interface to sniff on (default: scapy's default)")
     parser.add_argument("--host", help="[conntrack] SSH target for the router, e.g. root@192.168.1.1 (default: read locally)")
     parser.add_argument("--ssh-port", type=int, default=22, help="[conntrack] SSH port (default: 22)")
+    parser.add_argument("--netgear-host", default="routerlogin.net", help="[netgear] Router hostname/IP (default: routerlogin.net)")
+    parser.add_argument("--netgear-user", default="admin", help="[netgear] Router admin username (default: admin)")
     parser.add_argument("--interval", type=float, default=2.0, help="Seconds between dashboard refreshes (default: 2)")
     args = parser.parse_args()
 
+    console = Console() if HAVE_RICH else None
+
+    if args.source == "netgear":
+        poll = run_netgear_source(args)
+        try:
+            if HAVE_RICH:
+                with Live(console=console, refresh_per_second=1) as live:
+                    while True:
+                        devices, traffic_meter = poll()
+                        table, meter_line = build_netgear_table(devices, traffic_meter)
+                        live.update(table)
+                        console.print(meter_line)
+            else:
+                while True:
+                    devices, traffic_meter = poll()
+                    table, meter_line = build_netgear_table(devices, traffic_meter)
+                    print(table)
+                    print(meter_line)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+        return
+
     stats = Stats()
     poll = run_sniff_source(args, stats) if args.source == "sniff" else run_conntrack_source(args, stats)
-    console = Console() if HAVE_RICH else None
 
     try:
         if HAVE_RICH:
