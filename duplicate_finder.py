@@ -14,14 +14,28 @@ Usage:
 
 import argparse
 import hashlib
+import os
 from collections import defaultdict
 from pathlib import Path
 
 
-def iter_files(root: Path):
-    for path in root.rglob("*"):
-        if path.is_file() and not path.is_symlink():
-            yield path
+def iter_files(root: Path, on_unreadable_dir=None):
+    """Yield every regular (non-symlink) file under root.
+
+    Path.rglob() silently swallows PermissionError from an unreadable
+    subdirectory and just yields nothing from it, with no way for the
+    caller to know some part of the tree was skipped. os.walk()'s
+    onerror hook gives us that visibility, so it's used here instead.
+    """
+    def _onerror(exc: OSError):
+        if on_unreadable_dir:
+            on_unreadable_dir(exc.filename or str(root), exc)
+
+    for dirpath, _dirnames, filenames in os.walk(root, onerror=_onerror):
+        for name in filenames:
+            path = Path(dirpath) / name
+            if path.is_file() and not path.is_symlink():
+                yield path
 
 
 def hash_file(path: Path, chunk_size: int = 1 << 20) -> str:
@@ -34,12 +48,12 @@ def hash_file(path: Path, chunk_size: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
-def find_duplicates(root: Path, min_size: int = 1) -> dict:
+def find_duplicates(root: Path, min_size: int = 1, on_unreadable_dir=None) -> dict:
     """Return {hash: [sorted paths]} for every group of 2+ files with
     byte-identical content. Only files of the same size are ever hashed
     against each other."""
     by_size = defaultdict(list)
-    for path in iter_files(root):
+    for path in iter_files(root, on_unreadable_dir=on_unreadable_dir):
         try:
             size = path.stat().st_size
         except OSError:
@@ -76,32 +90,57 @@ def main():
     if not root.is_dir():
         raise SystemExit(f"{args.directory!r} is not a directory")
 
+    skipped_dirs = []
+
+    def warn_unreadable(dirpath, exc):
+        skipped_dirs.append(dirpath)
+        print(f"  [!] Skipping unreadable directory {dirpath}: {exc.strerror or exc}")
+
     print(f"Scanning {root} ...")
-    duplicates = find_duplicates(root, args.min_size)
-
-    if not duplicates:
-        print("No duplicate files found.")
-        return
-
+    failed_deletes = 0
     total_wasted = 0
     total_dupes = 0
-    for digest, paths in sorted(duplicates.items(), key=lambda kv: kv[1][0]):
-        size = paths[0].stat().st_size
-        wasted = size * (len(paths) - 1)
-        total_wasted += wasted
-        total_dupes += len(paths) - 1
-        print(f"\n{len(paths)} copies ({size:,} bytes each, {wasted:,} bytes wasted):")
-        for i, path in enumerate(paths):
-            marker = "KEEP" if i == 0 else "DUPE"
-            print(f"  [{marker}] {path}")
-        if args.delete:
-            for path in paths[1:]:
-                path.unlink()
-                print(f"  Deleted {path}")
+    try:
+        duplicates = find_duplicates(root, args.min_size, on_unreadable_dir=warn_unreadable)
 
-    print(f"\n{total_dupes} duplicate file(s) in {len(duplicates)} group(s), {total_wasted:,} bytes wasted.")
-    if not args.delete:
-        print("Nothing was deleted (pass --delete to remove all but the first copy in each group).")
+        if not duplicates:
+            print("No duplicate files found.")
+        else:
+            for digest, paths in sorted(duplicates.items(), key=lambda kv: kv[1][0]):
+                try:
+                    size = paths[0].stat().st_size
+                except OSError:
+                    print(f"\n{len(paths)} copies (size unknown -- {paths[0]} vanished since scanning):")
+                    size = None
+                else:
+                    wasted = size * (len(paths) - 1)
+                    total_wasted += wasted
+                    print(f"\n{len(paths)} copies ({size:,} bytes each, {wasted:,} bytes wasted):")
+                total_dupes += len(paths) - 1
+
+                for i, path in enumerate(paths):
+                    marker = "KEEP" if i == 0 else "DUPE"
+                    print(f"  [{marker}] {path}")
+                if args.delete:
+                    for path in paths[1:]:
+                        try:
+                            path.unlink()
+                            print(f"  Deleted {path}")
+                        except OSError as exc:
+                            failed_deletes += 1
+                            print(f"  [!] Could not delete {path}: {exc.strerror or exc}")
+
+            print(f"\n{total_dupes} duplicate file(s) in {len(duplicates)} group(s), {total_wasted:,} bytes wasted.")
+            if not args.delete:
+                print("Nothing was deleted (pass --delete to remove all but the first copy in each group).")
+            elif failed_deletes:
+                print(f"{failed_deletes} file(s) could not be deleted (see [!] lines above).")
+    except KeyboardInterrupt:
+        print("\nStopped (partial results above).")
+
+    if skipped_dirs:
+        noun = "directory" if len(skipped_dirs) == 1 else "directories"
+        print(f"\n{len(skipped_dirs)} {noun} could not be read and were skipped.")
 
 
 if __name__ == "__main__":

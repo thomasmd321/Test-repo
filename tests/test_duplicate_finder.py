@@ -129,5 +129,90 @@ class TestMainValidation(DuplicateFinderTestCase):
         self.assertIn("not a directory", str(ctx.exception))
 
 
+class TestUnreadableDirectory(DuplicateFinderTestCase):
+    """Path.rglob() silently swallows PermissionError from an unreadable
+    subdirectory, giving no signal that part of the tree was skipped.
+    iter_files()/find_duplicates() must surface that instead."""
+
+    def test_on_unreadable_dir_callback_fires_for_a_directory_that_cant_be_scanned(self):
+        self.write("a.txt", "hello world")
+        self.write("locked/b.txt", "hello world")
+
+        calls = []
+
+        def fake_walk(top, onerror=None, **kwargs):
+            onerror(PermissionError(13, "Permission denied", str(self.root / "locked")))
+            yield str(self.root), ["locked"], ["a.txt"]
+
+        with mock.patch.object(m.os, "walk", side_effect=fake_walk):
+            duplicates = m.find_duplicates(self.root, on_unreadable_dir=lambda path, exc: calls.append(path))
+
+        self.assertEqual(len(calls), 1)
+        self.assertIn("locked", calls[0])
+        # the directory we COULD scan is still processed normally
+        self.assertEqual(duplicates, {})
+
+    def test_main_reports_a_skipped_directory_without_crashing(self):
+        import contextlib
+        import io
+
+        self.write("a.txt", "hello world")
+
+        def fake_walk(top, onerror=None, **kwargs):
+            onerror(PermissionError(13, "Permission denied", str(self.root / "locked")))
+            yield str(self.root), [], ["a.txt"]
+
+        with mock.patch.object(sys, "argv", ["duplicate_finder.py", str(self.root)]), \
+             mock.patch.object(m.os, "walk", side_effect=fake_walk):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.main()
+
+        self.assertIn("could not be read and were skipped", buf.getvalue())
+
+
+class TestDeleteFailureIsReportedNotFatal(DuplicateFinderTestCase):
+    def test_unlink_failure_on_one_file_does_not_abort_the_rest(self):
+        self.write("a.txt", "hello world")
+        self.write("b.txt", "hello world")
+        self.write("c.txt", "hello world")
+
+        real_unlink = Path.unlink
+        call_count = {"n": 0}
+
+        def flaky_unlink(self_path, *a, **kw):
+            call_count["n"] += 1
+            if self_path.name == "b.txt":
+                raise OSError("simulated: file busy")
+            return real_unlink(self_path, *a, **kw)
+
+        with mock.patch.object(sys, "argv", ["duplicate_finder.py", str(self.root), "--delete"]), \
+             mock.patch.object(Path, "unlink", flaky_unlink):
+            m.main()  # must not raise despite b.txt's unlink failing
+
+        remaining = {p.name for p in self.root.glob("*.txt")}
+        # a.txt kept as the designated original; b.txt's delete failed so it
+        # must still be on disk; c.txt's delete succeeded so it's gone.
+        self.assertIn("a.txt", remaining)
+        self.assertIn("b.txt", remaining)
+        self.assertNotIn("c.txt", remaining)
+
+
+class TestMainKeyboardInterrupt(DuplicateFinderTestCase):
+    def test_keyboard_interrupt_during_scan_stops_cleanly(self):
+        import contextlib
+        import io
+
+        self.write("a.txt", "hello world")
+
+        with mock.patch.object(sys, "argv", ["duplicate_finder.py", str(self.root)]), \
+             mock.patch.object(m, "find_duplicates", side_effect=KeyboardInterrupt):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.main()  # must not raise/traceback
+
+        self.assertIn("Stopped", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
