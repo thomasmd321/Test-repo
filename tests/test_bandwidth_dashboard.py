@@ -228,21 +228,39 @@ class TestNetgearTable(unittest.TestCase):
         base.update(overrides)
         return self.Device(**base)
 
+    @staticmethod
+    def _as_text(table):
+        """build_netgear_table()'s first return value is a rich.table.Table
+        when rich is installed (it's fed straight into Live.update() in
+        main()) and a plain string otherwise. Render the Table case to
+        plain text so assertions can treat both the same way -- without
+        this, these tests only ever exercised the no-rich fallback branch
+        and silently never covered the rich.Table path at all."""
+        if not m.HAVE_RICH:
+            return table
+        from rich.console import Console
+        console = Console(record=True, width=200)
+        console.print(table)
+        return console.export_text()
+
     def test_ssid_and_link_type_both_shown_no_mismatch(self):
-        table_text, meter_line = m.build_netgear_table([self._device()], {})
+        table, meter_line = m.build_netgear_table([self._device()], {})
+        table_text = self._as_text(table)
         self.assertIn("Home-5G", table_text)
         self.assertIn("5GHz", table_text)
 
     def test_sorted_by_link_rate_descending(self):
         slow = self._device(name="iot", link_rate="300")
         fast = self._device(name="phone", link_rate="866")
-        table_text, _ = m.build_netgear_table([slow, fast], {})
+        table, _ = m.build_netgear_table([slow, fast], {})
+        table_text = self._as_text(table)
         self.assertLess(table_text.index("phone"), table_text.index("iot"))
 
     def test_missing_link_rate_sorts_last_not_crashes(self):
         no_rate = self._device(name="unknown", link_rate=None)
         fast = self._device(name="phone", link_rate="866")
-        table_text, _ = m.build_netgear_table([no_rate, fast], {})
+        table, _ = m.build_netgear_table([no_rate, fast], {})
+        table_text = self._as_text(table)
         self.assertLess(table_text.index("phone"), table_text.index("unknown"))
 
     def test_empty_traffic_meter_shows_unavailable_message(self):
