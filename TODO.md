@@ -227,6 +227,103 @@ finished request threads are never retained); GET-path traversal in
 (`safe_upload_name()` correctly strips `.`/`..`/directory components on
 both POSIX and Windows separators).
 
+## Bugs found by a third review pass (not yet fixed)
+
+A full re-read of all 8 scripts, prompted by "review all code, add findings
+to the to-do list" -- not a subagent pass this time, done directly. Covers
+`bandwidth_dashboard.py` and `arp_spoof_detector.py` for the first time
+since the very first hardening pass, plus a fresh adversarial look at the
+six scripts fixed earlier this round (on the theory that a round of fixes
+is exactly where a fresh bug is most likely to have been introduced or
+missed). Every item below was verified by a live reproduction, not just
+read and assumed -- noted per item. None of these are fixed yet.
+
+**Medium severity:**
+
+- [ ] `lan_file_server.py`: an abrupt client disconnect during upload
+      (a TCP RST, not just a clean close -- a WiFi drop, a crashed
+      client, a client closing with `SO_LINGER` set to 0) raises
+      `ConnectionResetError` from `self.rfile.read()` inside `do_POST()`.
+      That's uncaught, so it propagates past the quiet-on-disconnect
+      `try/except (BrokenPipeError, ConnectionResetError)` block entirely
+      (never reaches it) and socketserver's default error handler prints
+      a full traceback to stderr -- the exact noise this file's
+      `log_message` override and its already-fixed malformed-
+      `Content-Length` bug were both meant to avoid. Reproduced live with
+      a raw socket forcing a real RST (`SO_LINGER` 1/0) mid-upload. Not a
+      correctness bug -- the temp-file cleanup in the `finally` block
+      still runs correctly either way (verified: no leaked temp file, no
+      corrupted real file) -- purely unwanted stderr noise.
+- [ ] `network_scanner.py`: `ping()` (used by the ping-sweep fallback)
+      has no guard for a missing `ping` binary, unlike `read_arp_table()`
+      in the same file, which already catches `FileNotFoundError` for
+      the identical situation with the `arp` binary. On a system with no
+      `ping` on `PATH` (minimal containers, some stripped-down distros --
+      this very sandbox is one example), the whole scan crashes with a
+      raw traceback instead of degrading the way the `arp` case already
+      does. Reproduced live: `ping_sweep("127.0.0.1/32", timeout=1)`
+      raises `FileNotFoundError: ... 'ping'` straight out, uncaught by
+      `scan()` or `main()`. Related, lower-priority observation: `ping()`
+      also passes no `timeout=` to its own `subprocess.run()` call --
+      it relies entirely on the `ping` command's own `-W`/`-w` flag to
+      bound runtime, with no hard backstop if that flag is ignored or
+      misbehaves on some platform/ping variant.
+- [ ] `bandwidth_dashboard.py`: `run_netgear_source()`'s `poll()` closure
+      (`router.get_attached_devices_2()` / `router.get_traffic_meter()`)
+      has no exception handling. If the router becomes unreachable
+      mid-session (reboot, WiFi drop, a timed-out SOAP call) after a
+      successful initial login, the dashboard crashes with a raw
+      traceback -- unlike the sniff and conntrack sources, where the
+      very first hardening pass explicitly fixed this exact "source dies
+      mid-session" failure mode with a friendly `SystemExit`. The netgear
+      source was added/reviewed separately and never got the same
+      treatment.
+
+**Low severity:**
+
+- [ ] `cert_expiry_checker.py`: `--file` is opened with a bare
+      `open(args.file)`, with no `try/except` around it -- a missing or
+      unreadable file crashes with a raw `FileNotFoundError` traceback
+      instead of the friendly `SystemExit` every other file-touching
+      operation in this repo gives for the same kind of mistake (compare
+      `duplicate_finder.py`'s directory check, `lan_file_server.py`'s
+      bind-error handling). Reproduced live: `--file
+      /does/not/exist.txt` dumps a traceback.
+- [ ] `port_scanner.py`: `--timeout` isn't validated the way `--workers`
+      now is (this session's own fix, in this same file) -- a negative
+      value (e.g. `--timeout -1`) crashes with a raw
+      `ValueError: Timeout value out of range` from inside a worker
+      thread. `scan_host()`'s `except OSError: continue` doesn't catch
+      it (`ValueError` isn't an `OSError`), so it propagates uncaught.
+      Same bug class as the `--workers` fix, just missed for the
+      sibling flag. Reproduced live.
+- [ ] `bandwidth_dashboard.py`: `Stats.hostnames` grows one entry per
+      unique IP ever seen in the live table's top-20 ranked list, for
+      the life of the process, with no pruning -- the same unbounded-
+      growth shape already found and fixed for `arp_spoof_detector.py`'s
+      `FlapDetector.last_seen` (via `--stale-after`). Lower severity
+      here: `hostname_for()` only gets called for IPs that make a given
+      poll's top-20, and a home LAN has a small, fairly stable device
+      set, so growth is slow in the realistic case -- but for a dashboard
+      left running for days on a busier/more open network, it's the same
+      "unbounded growth over an unattended long run" category this repo
+      has treated as worth fixing elsewhere. Not reproduced live (would
+      require simulating a very long run with many distinct top-20 IPs);
+      flagged from reading the code against the same pattern already
+      fixed once in this codebase.
+
+**Doc/comment nits** (trivial, no behavior change, listed so they don't
+get lost):
+
+- [ ] `requirements.txt`'s comment for `scapy` reads "network_scanner.py
+      (--source-free ARP scan)" -- garbled; `network_scanner.py` has no
+      `--source` flag at all (that's `bandwidth_dashboard.py`'s flag).
+- [ ] README.md and TODO.md's `tests/` entries both still say "171
+      tests"; the actual count is 172 as of this session's last fix
+      (network_scanner.py's `KeyboardInterrupt` handling added one test
+      after those docs were last updated) -- and will need updating
+      again once the items above are fixed and tested.
+
 ## Possible improvements
 
 Findings from a general (non-adversarial) review of all 8 scripts, the
