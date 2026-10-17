@@ -184,5 +184,16 @@ class TestExitCodes(unittest.TestCase):
             m.main()  # must not raise
 
 
+class TestMainKeyboardInterrupt(unittest.TestCase):
+    def test_keyboard_interrupt_mid_scan_stops_cleanly_not_a_traceback(self):
+        with mock.patch.object(sys, "argv", ["network_scanner.py", "192.168.1.0/30"]), \
+             mock.patch.object(m, "scan", side_effect=KeyboardInterrupt):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.main()  # must not raise/traceback
+
+        self.assertIn("Stopped", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

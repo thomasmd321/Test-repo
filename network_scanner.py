@@ -175,7 +175,11 @@ def main():
 
     status(f"Scanning {subnet} ...")
 
-    devices = scan(subnet, args.timeout, log=status)
+    try:
+        devices = scan(subnet, args.timeout, log=status)
+    except KeyboardInterrupt:
+        status("\nStopped.")
+        return
 
     if not devices:
         status("No devices found.")

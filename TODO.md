@@ -264,7 +264,7 @@ tests, and the docs. Grouped by priority, not by file.
       (`json` is stdlib). Lower value for the other scripts. **Fixed**
       for both.
 
-**Nice-to-have (all done except one):**
+**Nice-to-have (all done):**
 
 - [x] `network_scanner.get_local_subnet()` doesn't catch `OSError` the
       way `lan_file_server.get_lan_ip()` does for the identical "guess my
@@ -279,16 +279,13 @@ tests, and the docs. Grouped by priority, not by file.
       **Fixed** for all three (see each script's README section for its
       exact exit-code meaning).
 - [x] `KeyboardInterrupt` handling for `duplicate_finder.py` (on a big
-      tree) and `port_scanner.py` (on a large `--ports` range) — both
-      dumped a raw traceback on Ctrl+C, unlike the four continuously-
-      running scripts, which all catch it and print "Stopped." **Fixed**
-      for both.
-- [ ] `network_scanner.py`'s ping sweep still has no `KeyboardInterrupt`
-      handling — split out from the item above since it wasn't actually
-      fixed. Lower priority than the `duplicate_finder.py`/
-      `port_scanner.py` cases: a ping sweep is bounded by `--max-hosts`
-      and each ping has its own short timeout, so a Ctrl+C here is a
-      shorter wait for a traceback rather than an open-ended one.
+      tree), `port_scanner.py` (on a large `--ports` range), and
+      `network_scanner.py` (on its ping sweep) — all three dumped a raw
+      traceback on Ctrl+C, unlike the four continuously-running scripts,
+      which all catch it and print "Stopped." **Fixed** for all three;
+      `network_scanner.py`'s fix also routes the "Stopped." message
+      through the same stderr-in-machine-readable-mode logic as its
+      other status messages.
 - [x] State a minimum Python version somewhere (README or docstrings) —
       never written down anywhere today. **Fixed:** README now states
       3.9+ (matches the CI matrix; nothing in the code actually requires
