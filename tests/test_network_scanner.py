@@ -75,6 +75,15 @@ class TestScanFallback(unittest.TestCase):
         ping_sweep.assert_not_called()
 
 
+class TestGetLocalSubnet(unittest.TestCase):
+    def test_returns_none_instead_of_raising_when_no_route_is_available(self):
+        """The identical 'guess my LAN-facing address' trick in
+        lan_file_server.get_lan_ip() catches OSError; this must too,
+        rather than letting an unplugged/down interface crash main()."""
+        with mock.patch.object(m.socket, "socket", side_effect=OSError("Network is unreachable")):
+            self.assertIsNone(m.get_local_subnet())
+
+
 class TestMainSubnetGuard(unittest.TestCase):
     def _run_main(self, argv):
         with mock.patch.object(sys, "argv", ["network_scanner.py"] + argv), \
@@ -97,6 +106,13 @@ class TestMainSubnetGuard(unittest.TestCase):
 
     def test_default_sized_subnet_is_not_rejected(self):
         self._run_main(["192.168.1.0/24"])  # should not raise
+
+    def test_undetectable_subnet_gives_friendly_error_not_a_crash(self):
+        with mock.patch.object(sys, "argv", ["network_scanner.py"]), \
+             mock.patch.object(m, "get_local_subnet", return_value=None):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertIn("Could not auto-detect", str(ctx.exception))
 
 
 if __name__ == "__main__":

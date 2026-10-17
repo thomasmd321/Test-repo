@@ -27,11 +27,18 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 DEFAULT_MAX_HOSTS = 4096
 
 
-def get_local_subnet() -> str:
-    """Guess the local /24 subnet from the host's primary network interface."""
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.connect(("8.8.8.8", 80))
-        local_ip = sock.getsockname()[0]
+def get_local_subnet():
+    """Guess the local /24 subnet from the host's primary network
+    interface. Returns None (rather than letting OSError propagate) if
+    no network route is available -- e.g. no interface is up -- the
+    same way lan_file_server.get_lan_ip() handles the identical
+    "guess my LAN-facing address" trick."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            local_ip = sock.getsockname()[0]
+    except OSError:
+        return None
     network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
     return str(network)
 
@@ -128,6 +135,11 @@ def main():
     args = parser.parse_args()
 
     subnet = args.subnet or get_local_subnet()
+    if subnet is None:
+        raise SystemExit(
+            "Could not auto-detect the local subnet (no network route available). "
+            "Pass one explicitly, e.g. network_scanner.py 192.168.1.0/24."
+        )
 
     try:
         network = ipaddress.ip_network(subnet, strict=False)

@@ -97,6 +97,37 @@ class TestMainHostResolution(unittest.TestCase):
                 m.main()
         self.assertIn("Invalid --ports", str(ctx.exception))
 
+    def test_zero_workers_gives_friendly_error_not_a_raw_valueerror(self):
+        """ThreadPoolExecutor(max_workers=0) raises a bare ValueError;
+        main() must catch this itself before it ever reaches there."""
+        import sys
+        with mock.patch.object(sys, "argv", ["port_scanner.py", "127.0.0.1", "--workers", "0"]):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertIn("--workers", str(ctx.exception))
+
+    def test_negative_workers_gives_friendly_error(self):
+        import sys
+        with mock.patch.object(sys, "argv", ["port_scanner.py", "127.0.0.1", "--workers", "-5"]):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertIn("--workers", str(ctx.exception))
+
+
+class TestMainKeyboardInterrupt(unittest.TestCase):
+    def test_keyboard_interrupt_mid_scan_stops_cleanly_not_a_traceback(self):
+        import contextlib
+        import io
+        import sys
+
+        with mock.patch.object(sys, "argv", ["port_scanner.py", "127.0.0.1"]), \
+             mock.patch.object(m, "scan_host", side_effect=KeyboardInterrupt):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.main()  # must not raise/traceback
+
+        self.assertIn("Stopped", buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

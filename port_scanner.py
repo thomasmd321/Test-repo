@@ -86,6 +86,9 @@ def main():
     parser.add_argument("--workers", type=int, default=200, help="Concurrent connection attempts (default: 200)")
     args = parser.parse_args()
 
+    if args.workers < 1:
+        raise SystemExit(f"--workers must be at least 1 (got {args.workers})")
+
     try:
         ports = parse_ports(args.ports) if args.ports else list(COMMON_PORTS)
     except ValueError as exc:
@@ -97,7 +100,11 @@ def main():
         raise SystemExit(f"Could not resolve {args.host}: {exc}")
 
     print(f"Scanning {args.host} ({len(ports)} ports) ...")
-    open_ports = scan_host(resolved, ports, args.timeout, args.workers)
+    try:
+        open_ports = scan_host(resolved, ports, args.timeout, args.workers)
+    except KeyboardInterrupt:
+        print("\nStopped.")
+        return
 
     if not open_ports:
         print("No open ports found.")
