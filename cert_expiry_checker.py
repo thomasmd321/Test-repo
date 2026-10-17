@@ -23,7 +23,19 @@ import sys
 
 
 def parse_host_port(spec: str, default_port: int = 443):
-    """Split "host" or "host:port" into (host, port)."""
+    """Split "host", "host:port", "[ipv6]", or "[ipv6]:port" into
+    (host, port). A bare IPv6 literal (e.g. "2001:db8::1") has multiple
+    colons and no brackets -- naively splitting on the last colon would
+    misparse it as host "2001:db8:" port "1", so a spec with more than
+    one colon and no brackets is treated as a whole, portless host
+    instead of guessing where a port split might go."""
+    if spec.startswith("["):
+        host, _, rest = spec[1:].partition("]")
+        if rest.startswith(":"):
+            return host, int(rest[1:])
+        return host, default_port
+    if spec.count(":") > 1:
+        return spec, default_port  # bare IPv6 literal, no port given
     host, sep, port_str = spec.rpartition(":")
     if not sep:
         return spec, default_port
@@ -94,13 +106,24 @@ def main():
     exit_code = 0
     print(f"{'Host':<32}{'Port':<8}{'Days Left':<12}Status")
     print("-" * 72)
-    for spec in hosts:
-        host, port = parse_host_port(spec)
-        days_left, error = check_host(host, port, args.timeout)
-        status, contribution = classify(days_left, error, args.warn_days)
-        exit_code = max(exit_code, contribution)
-        days_text = "?" if days_left is None else str(days_left)
-        print(f"{host:<32}{port:<8}{days_text:<12}{status}")
+    try:
+        for spec in hosts:
+            try:
+                host, port = parse_host_port(spec)
+            except ValueError as exc:
+                # A malformed spec (e.g. a non-numeric port) shouldn't
+                # abort checking every other host in the list/--file --
+                # report it the same way a connection failure would.
+                exit_code = max(exit_code, 2)
+                print(f"{spec:<32}{'?':<8}{'?':<12}ERROR: invalid host:port ({exc})")
+                continue
+            days_left, error = check_host(host, port, args.timeout)
+            status, contribution = classify(days_left, error, args.warn_days)
+            exit_code = max(exit_code, contribution)
+            days_text = "?" if days_left is None else str(days_left)
+            print(f"{host:<32}{port:<8}{days_text:<12}{status}")
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
     sys.exit(exit_code)
 

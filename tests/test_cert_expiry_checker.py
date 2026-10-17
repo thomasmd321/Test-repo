@@ -31,6 +31,24 @@ class TestParseHostPort(unittest.TestCase):
     def test_host_with_explicit_port(self):
         self.assertEqual(m.parse_host_port("example.com:8443"), ("example.com", 8443))
 
+    def test_bare_ipv6_literal_not_misparsed_as_host_plus_port(self):
+        """The original finding: naive rpartition(":") turned
+        "2001:db8::1" into host "2001:db8:" port 1."""
+        self.assertEqual(m.parse_host_port("2001:db8::1"), ("2001:db8::1", 443))
+
+    def test_bare_ipv6_loopback(self):
+        self.assertEqual(m.parse_host_port("::1"), ("::1", 443))
+
+    def test_bracketed_ipv6_no_port(self):
+        self.assertEqual(m.parse_host_port("[2001:db8::1]"), ("2001:db8::1", 443))
+
+    def test_bracketed_ipv6_with_port(self):
+        self.assertEqual(m.parse_host_port("[2001:db8::1]:8443"), ("2001:db8::1", 8443))
+
+    def test_non_numeric_port_still_raises(self):
+        with self.assertRaises(ValueError):
+            m.parse_host_port("example.com:notaport")
+
 
 class TestParseNotAfter(unittest.TestCase):
     def test_parses_openssl_format_as_utc(self):
@@ -155,6 +173,59 @@ class TestRealTlsHandshake(unittest.TestCase):
         expiry = m.get_certificate_expiry("localhost", port=port, timeout=5.0, context=client_ctx)
 
         self.assertEqual(expiry, self.expected_expiry)
+
+
+class TestMainBatchHandling(unittest.TestCase):
+    """main()'s per-host loop, exercised through its real argv/stdout
+    surface rather than by calling check_host()/classify() directly."""
+
+    def _run_main_with_mocked_expiry(self, argv, fixed_expiry):
+        import contextlib
+        import io
+
+        with mock.patch.object(sys, "argv", ["cert_expiry_checker.py"] + argv), \
+             mock.patch.object(m, "get_certificate_expiry", return_value=fixed_expiry):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    m.main()
+                except SystemExit as exc:
+                    return buf.getvalue(), exc.code
+        raise AssertionError("main() should always call sys.exit()")
+
+    def test_one_malformed_spec_does_not_abort_checking_the_rest(self):
+        fixed_expiry = datetime.datetime(2099, 1, 1, tzinfo=datetime.timezone.utc)
+        output, exit_code = self._run_main_with_mocked_expiry(
+            ["good1.example", "bad:", "good2.example"], fixed_expiry,
+        )
+        self.assertIn("good1.example", output)
+        self.assertIn("good2.example", output)
+        self.assertIn("ERROR", output)
+        self.assertEqual(exit_code, 2)
+
+    def test_keyboard_interrupt_mid_batch_stops_cleanly_with_partial_results(self):
+        import contextlib
+        import io
+
+        def raise_on_second_host(host, port, timeout):
+            if host == "host2":
+                raise KeyboardInterrupt
+            return 100, None
+
+        with mock.patch.object(sys, "argv", ["cert_expiry_checker.py", "host1", "host2", "host3"]), \
+             mock.patch.object(m, "check_host", side_effect=raise_on_second_host):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    m.main()
+                except SystemExit as exc:
+                    exit_code = exc.code
+
+        output = buf.getvalue()
+        self.assertIn("Stopped.", output)
+        self.assertIn("host1", output)
+        self.assertNotIn("host3", output)  # never reached
+        self.assertEqual(exit_code, 0)
 
 
 if __name__ == "__main__":
