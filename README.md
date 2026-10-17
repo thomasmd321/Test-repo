@@ -32,10 +32,10 @@ table when scapy isn't installed or the process lacks the privileges ARP
 scanning requires.
 
 ```
-python network_scanner.py                 # auto-detect local subnet
-python network_scanner.py 192.168.1.0/24   # scan a specific subnet
-python network_scanner.py --timeout 2
-python network_scanner.py --max-hosts 10000 10.0.0.0/20   # override the size guard
+python3 network_scanner.py                 # auto-detect local subnet
+python3 network_scanner.py 192.168.1.0/24   # scan a specific subnet
+python3 network_scanner.py --timeout 2
+python3 network_scanner.py --max-hosts 10000 10.0.0.0/20   # override the size guard
 ```
 
 Refuses to scan a subnet larger than `--max-hosts` addresses (default 4096)
@@ -57,9 +57,9 @@ is.
 Passively sniffs traffic on a local network interface with scapy.
 
 ```
-sudo python bandwidth_dashboard.py                  # auto-pick interface
-sudo python bandwidth_dashboard.py --interface eth0
-sudo python bandwidth_dashboard.py --interval 5
+sudo python3 bandwidth_dashboard.py                  # auto-pick interface
+sudo python3 bandwidth_dashboard.py --interface eth0
+sudo python3 bandwidth_dashboard.py --interval 5
 ```
 
 **Caveat:** on a typical switched network, an ordinary host only sees its
@@ -81,8 +81,8 @@ real whole-LAN, per-device totals without needing a vendor-specific router
 API.
 
 ```
-python bandwidth_dashboard.py --source conntrack                       # running on the router itself
-python bandwidth_dashboard.py --source conntrack --host root@192.168.1.1  # polled over SSH
+python3 bandwidth_dashboard.py --source conntrack                       # running on the router itself
+python3 bandwidth_dashboard.py --source conntrack --host root@192.168.1.1  # polled over SSH
 ```
 
 Requires the router to run Linux, and either running this script on the
@@ -113,8 +113,8 @@ router-**wide** traffic meter.
 
 ```
 pip install pynetgear
-NETGEAR_PASSWORD=yourpassword python bandwidth_dashboard.py --source netgear
-NETGEAR_PASSWORD=yourpassword python bandwidth_dashboard.py --source netgear --netgear-host routerlogin.net --netgear-user admin
+NETGEAR_PASSWORD=yourpassword python3 bandwidth_dashboard.py --source netgear
+NETGEAR_PASSWORD=yourpassword python3 bandwidth_dashboard.py --source netgear --netgear-host routerlogin.net --netgear-user admin
 ```
 
 Requires **Traffic Meter** enabled in the router's web UI (*Advanced > Setup
@@ -164,12 +164,12 @@ explicitly told it to trust ("pinned"). It never sends, forges, or blocks
 any traffic; it only reads and reports.
 
 ```
-sudo python arp_spoof_detector.py                  # auto-pick interface
-sudo python arp_spoof_detector.py --interface eth0
-sudo python arp_spoof_detector.py --flap-window 10 --pin 192.168.1.1=aa:bb:cc:11:22:33
+sudo python3 arp_spoof_detector.py                  # auto-pick interface
+sudo python3 arp_spoof_detector.py --interface eth0
+sudo python3 arp_spoof_detector.py --flap-window 10 --pin 192.168.1.1=aa:bb:cc:11:22:33
 
 # Repair a poisoned entry without sniffing, e.g. after an alert:
-python arp_spoof_detector.py --repair 192.168.1.1=aa:bb:cc:11:22:33
+python3 arp_spoof_detector.py --repair 192.168.1.1=aa:bb:cc:11:22:33
 ```
 
 `--repair` dispatches to the OS's own static-ARP command (`arp -s` on
@@ -197,10 +197,10 @@ short timeout. Pairs naturally with `network_scanner.py`: find devices on
 the LAN, then scan a specific one's ports.
 
 ```
-python port_scanner.py 192.168.1.50                  # ~25 common ports
-python port_scanner.py 192.168.1.50 --ports 1-1024
-python port_scanner.py 192.168.1.50 --ports 22,80,443
-python port_scanner.py 192.168.1.50 --ports 1-65535 --timeout 0.3
+python3 port_scanner.py 192.168.1.50                  # ~25 common ports
+python3 port_scanner.py 192.168.1.50 --ports 1-1024
+python3 port_scanner.py 192.168.1.50 --ports 22,80,443
+python3 port_scanner.py 192.168.1.50 --ports 1-65535 --timeout 0.3
 ```
 
 | Flag | Description |
@@ -219,9 +219,9 @@ gets hashed against a file it can't possibly match. Report-only by default;
 nothing is deleted unless you pass `--delete`.
 
 ```
-python duplicate_finder.py ~/Downloads
-python duplicate_finder.py ~/Downloads --min-size 1024
-python duplicate_finder.py ~/Downloads --delete   # keep first copy, remove the rest
+python3 duplicate_finder.py ~/Downloads
+python3 duplicate_finder.py ~/Downloads --min-size 1024
+python3 duplicate_finder.py ~/Downloads --delete   # keep first copy, remove the rest
 ```
 
 | Flag | Description |
@@ -239,10 +239,10 @@ is 0 if everything's healthy, 1 if anything's expiring soon, 2 if anything
 is already expired or unreachable — so it's usable as a cron/monitoring check.
 
 ```
-python cert_expiry_checker.py example.com
-python cert_expiry_checker.py example.com:8443 mail.example.com
-python cert_expiry_checker.py --warn-days 14 example.com
-python cert_expiry_checker.py --file hosts.txt
+python3 cert_expiry_checker.py example.com
+python3 cert_expiry_checker.py example.com:8443 mail.example.com
+python3 cert_expiry_checker.py --warn-days 14 example.com
+python3 cert_expiry_checker.py --file hosts.txt
 ```
 
 | Flag | Description |
@@ -261,10 +261,10 @@ truncated or renamed/replaced file (logrotate, copytruncate, etc.) is
 detected and reopened automatically rather than silently going stale.
 
 ```
-python log_watcher.py /var/log/syslog --pattern "error|failed"
-python log_watcher.py app.log --pattern "ERROR" --pattern "WARN:.*timeout"
-python log_watcher.py app.log --pattern "ERROR" --from-start
-python log_watcher.py app.log --pattern "ERROR" --interval 0.5
+python3 log_watcher.py /var/log/syslog --pattern "error|failed"
+python3 log_watcher.py app.log --pattern "ERROR" --pattern "WARN:.*timeout"
+python3 log_watcher.py app.log --pattern "ERROR" --from-start
+python3 log_watcher.py app.log --pattern "ERROR" --interval 0.5
 ```
 
 | Flag | Description |
@@ -278,7 +278,7 @@ No dependencies beyond the standard library.
 ## lan_file_server.py
 
 Shares a directory over HTTP with other devices on your LAN — browse and
-download like `python -m http.server`, plus it prints the URL to use from
+download like `python3 -m http.server`, plus it prints the URL to use from
 another device. Uploads are **off by default**; pass `--allow-upload` to
 also accept them (via a simple web form at `/upload-form`, or directly:
 `curl -X POST --data-binary @file.txt "http://host:port/upload?name=file.txt"`).
@@ -286,10 +286,10 @@ Uploaded filenames are reduced to a bare basename before being written, so
 an upload can never escape the served directory via `../`.
 
 ```
-python lan_file_server.py                      # serve the current directory, port 8000
-python lan_file_server.py ~/Public --port 9000
-python lan_file_server.py --allow-upload
-python lan_file_server.py --bind 127.0.0.1      # local machine only, not the LAN
+python3 lan_file_server.py                      # serve the current directory, port 8000
+python3 lan_file_server.py ~/Public --port 9000
+python3 lan_file_server.py --allow-upload
+python3 lan_file_server.py --bind 127.0.0.1      # local machine only, not the LAN
 ```
 
 | Flag | Description |
@@ -311,7 +311,7 @@ dependencies beyond the standard library.
 python3 -m unittest
 ```
 
-Runs the full suite in `tests/` (one file per tool, ~120 tests). Almost
+Runs the full suite in `tests/` (one file per tool, 119 tests). Almost
 everything is a real integration test rather than a mock — a real TCP
 listener for `port_scanner.py`, a real self-signed TLS handshake (via the
 system `openssl` CLI) for `cert_expiry_checker.py`, a real HTTP server for

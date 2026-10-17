@@ -46,7 +46,7 @@
         trigger is the exact attack this tool exists to catch (many
         forged source IPs); running without root now gives a friendly
         "are you running with sudo?" message instead of a raw traceback.
-- [x] `tests/` — a real unit test suite (~120 tests, one file per tool),
+- [x] `tests/` — a real unit test suite (119 tests, one file per tool),
       replacing the ad hoc throwaway tests every round of development had
       used before. Favors real integration tests (a real TCP listener, a
       real self-signed TLS handshake, a real HTTP server, real temp files)
@@ -56,6 +56,93 @@
       was returning an unterminated partial line as if it were complete,
       so its eventual completion showed up later as a spurious separate
       line — fixed with proper buffering before this was committed.
+- [x] Fixed an unclosed-`SSLSocket` resource leak in
+      `tests/test_cert_expiry_checker.py`'s real TLS handshake test (the
+      server-thread helper closed the raw socket but not the SSL wrapper
+      around it). Found by re-running the suite with
+      `-W error::ResourceWarning`, not by inspection; confirmed clean
+      under that flag afterward.
+- [x] README: verified every documented flag against every script's
+      actual `--help` output (automated diff, zero mismatches), and made
+      every usage example consistently invoke `python3` instead of a mix
+      of `python`/`python3` (the bare `python` form silently fails on
+      systems where it isn't mapped to Python 3).
+
+## Possible improvements
+
+Findings from a general (non-adversarial) review of all 8 scripts, the
+tests, and the docs. Grouped by priority, not by file.
+
+**Worth doing soon:**
+
+- [ ] `lan_file_server.py`: binding fails with a raw `PermissionError`/
+      `OSError` traceback (e.g. `--port 80` without root, or a port
+      already in use) instead of the friendly `SystemExit` every other
+      script gives for a comparable setup failure. This is the script
+      most likely to be run casually with a bad `--port`.
+- [ ] `chmod +x` all 8 scripts — every one has a `#!/usr/bin/env python3`
+      shebang but none are actually marked executable, so the shebang is
+      currently dead weight.
+- [ ] Add a CI workflow (e.g. GitHub Actions) running `python3 -m
+      unittest` on push. Nearly free, and the suite already exists and
+      passes locally — nothing currently enforces it stays that way.
+      (Closes the "no CI" open question below.)
+- [ ] `network_scanner.py`: add an `--ips-only` output mode (one bare IP
+      per line). The README already claims it "pairs naturally" with
+      `port_scanner.py`, but there's currently no actual mechanism to do
+      that (`network_scanner.py` only prints a formatted table,
+      `port_scanner.py` takes one positional host). `--ips-only` would
+      make `network_scanner.py --ips-only | xargs -n1 port_scanner.py`
+      work today without touching `port_scanner.py` at all.
+- [ ] `--json` output mode for `network_scanner.py` (device list) and
+      `cert_expiry_checker.py` (per-host status) — both have an obvious
+      scripting/monitoring consumer and fit the stdlib-only philosophy
+      (`json` is stdlib). Lower value for the other scripts.
+
+**Nice-to-have:**
+
+- [ ] `network_scanner.get_local_subnet()` doesn't catch `OSError` the
+      way `lan_file_server.get_lan_ip()` does for the identical "guess my
+      LAN IP via a UDP connect() trick" logic — a no-route environment
+      crashes one script but not the other for the same operation.
+- [ ] Meaningful exit codes for scripting: `network_scanner.py`,
+      `port_scanner.py`, and `duplicate_finder.py` all exit 0 whether or
+      not they found anything, making `if script ...; then` unusable.
+      Only `cert_expiry_checker.py` currently has real exit codes.
+- [ ] `KeyboardInterrupt` handling for the scripts whose single run can
+      take a while (`duplicate_finder.py` on a big tree,
+      `network_scanner.py`'s ping sweep, `port_scanner.py` on a large
+      `--ports` range) — they dump a raw traceback on Ctrl+C, unlike the
+      four continuously-running scripts, which all catch it and print
+      "Stopped."
+- [ ] State a minimum Python version somewhere (README or docstrings) —
+      never written down anywhere today.
+- [ ] A `requirements.txt` or `pyproject.toml` collecting the three
+      optional deps (`scapy`, `pynetgear`, `rich`) in one installable
+      place, instead of only discoverable by reading each script's README
+      section individually.
+- [ ] A small shared smoke test looping over all 8 scripts asserting
+      `--help` exits 0 — current tests exercise the underlying functions
+      thoroughly but don't uniformly exercise the actual argparse wiring
+      around them, so a typo'd flag definition (duplicate name, bad
+      `type=`) could in principle slip through.
+
+**Considered and declined** (recorded so these don't get re-litigated):
+
+- Extracting the duplicated "guess my LAN IP" / hostname-reverse-lookup
+  snippets into a shared module — too small and too low-risk either way
+  to be worth the coupling; these scripts are deliberately standalone and
+  copy-paste-portable.
+- A `--version` flag — nothing to report yet (no versioning scheme
+  exists); add the scheme first if this ever matters.
+- Config-file support (persisted default subnet, pinned ARP mappings,
+  etc.) — adds a new failure mode (where is it, what overrides what) for
+  marginal benefit in a single-user, ad hoc CLI context.
+- A LICENSE file — low priority while this stays a personal-use local
+  tool collection, not something distributed or shared publicly.
+- Making the repo pip-installable (`setup.py`/entry points) — not
+  actually a gap; "run with `python script.py`" is the intended shape,
+  not an oversight.
 
 ## Ideas raised but not built
 
@@ -67,9 +154,6 @@
 
 ## Open questions
 
-- None of the eight scripts have CI configured to actually run `tests/`
-  automatically (e.g. on push) — the suite exists and passes locally, but
-  nothing enforces that it keeps passing as the repo grows.
 - `port_scanner.py`'s and `lan_file_server.py`'s defaults (200 concurrent
   workers; binding to `0.0.0.0`) are reasonable for a trusted home LAN but
   worth a second look before pointing either at anything less trusted.
