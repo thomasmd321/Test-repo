@@ -8,6 +8,11 @@ alter, redirect, or throttle anyone's traffic; `duplicate_finder.py` and
 accepting uploads), but only when you explicitly opt in (`--delete`,
 `--allow-upload`).
 
+Requires **Python 3.9+** (stdlib only; see each tool's section below for
+its optional third-party dependencies, or install all of them at once with
+`pip install -r requirements.txt`). Every script is executable directly
+(`./network_scanner.py ...`) as well as via `python3 network_scanner.py ...`.
+
 | Tool | What it does |
 | --- | --- |
 | [`network_scanner.py`](#network_scannerpy) | Discovers devices on the local subnet (ARP scan / ping sweep) |
@@ -36,11 +41,26 @@ python3 network_scanner.py                 # auto-detect local subnet
 python3 network_scanner.py 192.168.1.0/24   # scan a specific subnet
 python3 network_scanner.py --timeout 2
 python3 network_scanner.py --max-hosts 10000 10.0.0.0/20   # override the size guard
+python3 network_scanner.py --ips-only                      # one bare IP per line
+python3 network_scanner.py --ips-only | xargs -n1 port_scanner.py
+python3 network_scanner.py --json
 ```
 
 Refuses to scan a subnet larger than `--max-hosts` addresses (default 4096)
 as a safety net against typos like `/8` instead of `/24`, which would
 otherwise try to sweep millions of hosts at once.
+
+| Flag | Description |
+| --- | --- |
+| `--timeout SECONDS` | Timeout per host (default: 1.0) |
+| `--max-hosts N` | Refuse to scan a subnet larger than this many addresses (default: 4096) |
+| `--ips-only` | Print one bare IP per line instead of a table, for piping into another tool (e.g. `port_scanner.py`); mutually exclusive with `--json` |
+| `--json` | Print the device list as a JSON array instead of a table |
+
+With `--ips-only`/`--json`, informational messages ("Scanning ...", the ARP
+fallback notice) go to stderr instead of stdout, so piping stdout straight
+into another command only ever sees the actual data. Exit code is 0 if at
+least one device was found, 1 if none were.
 
 Optional dependency: `scapy` (for the faster ARP scan; falls back to
 `ping`/`arp` otherwise).
@@ -207,7 +227,9 @@ python3 port_scanner.py 192.168.1.50 --ports 1-65535 --timeout 0.3
 | --- | --- |
 | `--ports SPEC` | Comma list and/or ranges, e.g. `22,80,443` or `1-1024` (default: ~25 common ports) |
 | `--timeout SECONDS` | Wait per port (default: 0.5) |
-| `--workers N` | Concurrent connection attempts (default: 200) |
+| `--workers N` | Concurrent connection attempts, must be at least 1 (default: 200) |
+
+Exit code is 0 if at least one open port was found, 1 if none were.
 
 No dependencies beyond the standard library.
 
@@ -229,6 +251,12 @@ python3 duplicate_finder.py ~/Downloads --delete   # keep first copy, remove the
 | `--min-size BYTES` | Ignore files smaller than this (default: 1, skips empty files) |
 | `--delete` | Delete all but the first copy in each duplicate group (default: report only) |
 
+An unreadable subdirectory is reported (and counted at the end) rather than
+silently skipped, and a single file that fails to delete is reported and
+counted rather than aborting the rest of the run. Exit code is 0 if
+duplicates were found (and, with `--delete`, all removed successfully), 1
+if none were found, 2 if one or more files couldn't be deleted.
+
 No dependencies beyond the standard library.
 
 ## cert_expiry_checker.py
@@ -243,6 +271,7 @@ python3 cert_expiry_checker.py example.com
 python3 cert_expiry_checker.py example.com:8443 mail.example.com
 python3 cert_expiry_checker.py --warn-days 14 example.com
 python3 cert_expiry_checker.py --file hosts.txt
+python3 cert_expiry_checker.py --json example.com mail.example.com
 ```
 
 | Flag | Description |
@@ -250,6 +279,11 @@ python3 cert_expiry_checker.py --file hosts.txt
 | `--file PATH` | Read additional hosts from a file, one per line (`#` comments allowed) |
 | `--warn-days N` | Flag certificates expiring within this many days (default: 30) |
 | `--timeout SECONDS` | Wait per connection (default: 5) |
+| `--json` | Print results as a JSON array (`{host, port, days_left, status}` per entry) instead of a table |
+
+Accepts bracketed IPv6 literals too (`[::1]`, `[::1]:8443`). A malformed
+host:port spec, or a single host that's unreachable, is reported as an
+error for that entry without aborting the rest of the batch.
 
 No dependencies beyond the standard library.
 
@@ -272,6 +306,11 @@ python3 log_watcher.py app.log --pattern "ERROR" --interval 0.5
 | `--pattern REGEX` | Alert on any line matching; repeatable (any match triggers an alert) |
 | `--from-start` | Scan existing content too, not just new lines (default: only new lines) |
 | `--interval SECONDS` | Poll interval (default: 1.0) |
+| `--max-line-bytes N` | Flush and bound memory if a line grows past this many bytes with no newline — e.g. a crashed/hung writer or a binary file watched by mistake (default: 1 MiB) |
+
+If the watched file is deleted and not recreated, prints a one-time warning
+instead of silently polling nothing forever, and prints again once it
+reappears.
 
 No dependencies beyond the standard library.
 
@@ -299,6 +338,12 @@ python3 lan_file_server.py --bind 127.0.0.1      # local machine only, not the L
 | `--allow-upload` | Also accept file uploads (default: read-only) |
 | `--max-upload-size BYTES` | Reject uploads larger than this (default: 1 GiB) |
 
+Uploads are written to a temp file and atomically renamed into place, so
+two uploads of the same filename at once (or a client disconnecting
+mid-upload) can never corrupt the file on disk or leave a truncated file
+under its real name. A bind failure (port already in use, or `--port 80`
+without root) gives a friendly error instead of a raw traceback.
+
 **By default this binds to all interfaces**, so anyone who can reach the
 port on your LAN can browse and download everything in the served
 directory (and upload, if enabled). Only run it on a network you trust,
@@ -309,15 +354,24 @@ dependencies beyond the standard library.
 
 ```
 python3 -m unittest
+pip install -r requirements.txt   # optional: unlocks the scapy-dependent tests too
 ```
 
-Runs the full suite in `tests/` (one file per tool, 119 tests). Almost
-everything is a real integration test rather than a mock — a real TCP
-listener for `port_scanner.py`, a real self-signed TLS handshake (via the
-system `openssl` CLI) for `cert_expiry_checker.py`, a real HTTP server for
-`lan_file_server.py` including a live path-traversal attempt against the
-upload endpoint, and real temp files/directories for `duplicate_finder.py`
-and `log_watcher.py` (including log rotation and truncation). The pieces
-that genuinely can't run without root, a real router, or a real external
-host (raw packet sniffing, actually pinging a LAN, talking to a Netgear
-router) are mocked at that boundary and no further.
+Runs the full suite in `tests/` (one file per tool, plus a shared smoke
+test, 171 tests total). Almost everything is a real integration test
+rather than a mock — a real TCP listener for `port_scanner.py`, a real
+self-signed TLS handshake (via the system `openssl` CLI) for
+`cert_expiry_checker.py`, a real HTTP server for `lan_file_server.py`
+including a live path-traversal attempt and a concurrent-upload race
+against the upload endpoint, and real temp files/directories for
+`duplicate_finder.py` and `log_watcher.py` (including log rotation and
+truncation). `tests/test_smoke_help.py` runs every script in the repo root
+as a real subprocess with `--help` and asserts it exits 0, catching
+argparse-wiring mistakes the per-script tests (which mostly call into the
+module directly) wouldn't. The pieces that genuinely can't run without
+root, a real router, or a real external host (raw packet sniffing,
+actually pinging a LAN, talking to a Netgear router) are mocked at that
+boundary and no further.
+
+A GitHub Actions workflow (`.github/workflows/tests.yml`) runs the same
+suite on push and PR across Python 3.9–3.12.

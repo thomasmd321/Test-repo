@@ -46,7 +46,8 @@
         trigger is the exact attack this tool exists to catch (many
         forged source IPs); running without root now gives a friendly
         "are you running with sudo?" message instead of a raw traceback.
-- [x] `tests/` — a real unit test suite (119 tests, one file per tool),
+- [x] `tests/` — a real unit test suite (171 tests as of the last fix
+      round, one file per tool plus a shared `--help` smoke test),
       replacing the ad hoc throwaway tests every round of development had
       used before. Favors real integration tests (a real TCP listener, a
       real self-signed TLS handshake, a real HTTP server, real temp files)
@@ -68,99 +69,152 @@
       of `python`/`python3` (the bare `python` form silently fails on
       systems where it isn't mapped to Python 3).
 
-## Bugs found by devil's-advocate review (not yet fixed)
+## Bugs found by devil's-advocate review (all fixed)
 
 A second adversarial pass, covering the five newer scripts (the earlier
 pass above only covered `network_scanner.py`/`bandwidth_dashboard.py`/
-`arp_spoof_detector.py`, and those findings are already fixed). Every
-item below was verified by reading the actual implementation — several
-also by a live reproduction against a throwaway test file/server, noted
-per item — not just asserted. Grouped by severity, most severe first.
+`arp_spoof_detector.py`, and those findings were already fixed at the
+time). Every item below was verified by reading the actual implementation
+— several also by a live reproduction against a throwaway test
+file/server, noted per item — before being fixed, and the fix itself was
+re-verified the same way (never just asserted). Grouped by severity, most
+severe first.
 
 **High severity:**
 
-- [ ] `log_watcher.py`: `LogWatcher._buffer` grows unboundedly if a line
+- [x] `log_watcher.py`: `LogWatcher._buffer` grows unboundedly if a line
       never terminates with `\n` — reproduced live (5× 100KB unterminated
       appends grew the buffer 100k→500k with zero lines ever flushed).
       Realistic trigger: a crashed/hung writer, a binary file pointed at
       by mistake, or any app streaming a large blob without a newline.
-      Real OOM risk for an hours-long unattended watch.
-- [ ] `lan_file_server.py`: concurrent uploads of the same filename
+      Real OOM risk for an hours-long unattended watch. **Fixed:** the
+      buffer now flushes as its own marked "[...truncated]" line once it
+      passes `--max-line-bytes` (default 1 MiB) instead of growing
+      forever; re-verified with a 15×100KB sustained stress test that
+      stays bounded.
+- [x] `lan_file_server.py`: concurrent uploads of the same filename
       silently clobber each other with no locking — reproduced live, two
       simultaneous uploads (all-A vs all-B) both returned HTTP 200
       success, but the file on disk ended up as pure B with 0 bytes of A.
       Byte-level interleaving/corruption is also possible depending on
       timing, not just last-write-wins, since both writers hold
-      independent fd offsets on the same truncated inode.
-- [ ] `lan_file_server.py`: a GET racing a concurrent upload of the same
+      independent fd offsets on the same truncated inode. **Fixed:**
+      uploads now stream into a private temp file and `os.replace()` into
+      place atomically on success only; re-verified with a 5-round,
+      two-threads-same-filename stress test — the file on disk is always
+      wholly one payload or the other, never a mix, never missing data.
+- [x] `lan_file_server.py`: a GET racing a concurrent upload of the same
       file can silently return content that didn't exist when the
       request was made — reproduced live (a GET for an existing 50MB
       file returned a concurrently-uploaded 1000-byte replacement
       instead). A mid-copy truncate can also produce a response shorter
       than its declared Content-Length. No synchronization exists between
-      the GET and POST paths.
+      the GET and POST paths. **Fixed:** the same temp-file + atomic-
+      rename fix above means a GET always sees either the old complete
+      file or the new complete file, never an in-progress write.
 
 **Medium severity:**
 
-- [ ] `cert_expiry_checker.py`: one malformed host spec in a list or
+- [x] `cert_expiry_checker.py`: one malformed host spec in a list or
       `--file` aborts the entire batch — `parse_host_port()` is called
       unguarded in `main()` (unlike `check_host()`, which wraps per-host
       failures), so a single bad line kills checking every other host.
-      Reproduced live.
-- [ ] `lan_file_server.py`: a malformed `Content-Length` header (e.g. a
+      Reproduced live. **Fixed:** wrapped in its own per-spec
+      `try/except ValueError`, reporting an ERROR row and continuing;
+      re-verified with a 3-host batch (one malformed) showing both good
+      hosts still checked.
+- [x] `lan_file_server.py`: a malformed `Content-Length` header (e.g. a
       non-numeric value) crashes the request handler with an uncaught
       `ValueError` instead of a 400 — reproduced live; also spams a full
       traceback to stderr despite the handler's `log_message` override
-      being meant to keep the server quiet.
-- [ ] `lan_file_server.py`: on a mid-upload client disconnect, the
+      being meant to keep the server quiet. **Fixed:** parsing is now
+      guarded, returning a clean 400; re-verified with a raw
+      `http.client` request carrying a non-numeric `Content-Length`.
+- [x] `lan_file_server.py`: on a mid-upload client disconnect, the
       success response still reports the originally-declared length
       instead of the actual bytes written, and the short/truncated file
       is left on disk under its real filename with no indication it's
-      incomplete (no temp-file + atomic-rename pattern).
-- [ ] `duplicate_finder.py`: `--delete`'s `path.unlink()` and the re-stat
+      incomplete (no temp-file + atomic-rename pattern). **Fixed:** same
+      temp-file fix as above — a short/aborted upload is never renamed
+      into place and the stray temp file is cleaned up; re-verified by
+      disconnecting mid-upload and confirming no file (real or temp) is
+      left behind.
+- [x] `duplicate_finder.py`: `--delete`'s `path.unlink()` and the re-stat
       in `main()` are unguarded (unlike every other filesystem touch in
       the file, which carefully catches `OSError`) — a permission error
       or a file disappearing mid-delete crashes the whole run partway
       through, with some duplicate groups deleted and others untouched
       and no summary of what succeeded. The re-stat is also redundant
-      (size is already known from the earlier grouping pass).
-- [ ] `lan_file_server.py`: Ctrl+C during an in-flight upload kills that
+      (size is already known from the earlier grouping pass). **Fixed:**
+      both are now guarded with `OSError`, reporting and counting a
+      failure instead of crashing; re-verified with a monkeypatched
+      `Path.unlink` that fails on one specific file among several
+      duplicates — the others still get deleted.
+- [x] `lan_file_server.py`: Ctrl+C during an in-flight upload kills that
       thread mid-write with no atomicity — `daemon_threads = True` means
       `server_close()`'s thread-join is a no-op (verified against
       `socketserver` source), so shutdown doesn't wait for in-flight
       requests. Leaves a truncated file under the real filename.
-- [ ] `log_watcher.py`: if the watched file is deleted and never
+      **Fixed:** the temp-file + atomic-rename pattern means an upload
+      killed mid-write just leaves an orphaned temp file, never a
+      truncated file under the real name.
+- [x] `log_watcher.py`: if the watched file is deleted and never
       recreated (not rotated, just gone), the watcher silently polls the
       stale fd forever, returning zero new lines with no warning that
       monitoring has effectively gone blind — reproduced live. Defeats
       the tool's purpose without any signal, for an hours-long
-      unattended watch.
-- [ ] `log_watcher.py`: only the rotation-check's `FileNotFoundError` is
+      unattended watch. **Fixed:** added `LogWatcher.file_missing()`;
+      `main()`'s loop now prints a one-time warning on the
+      missing/present transition instead of staying silent; re-verified
+      it doesn't spam the warning every poll cycle while still missing.
+- [x] `log_watcher.py`: only the rotation-check's `FileNotFoundError` is
       caught; a transient `OSError` from reopening after rotation, or
       from the per-poll `read()` itself (permission change,
       removable/network media hiccup), propagates uncaught and kills the
-      whole watcher.
+      whole watcher. **Fixed:** `poll_new_lines()` now catches `OSError`
+      around the read/reopen and treats it as "nothing new this cycle";
+      re-verified with a mocked `read()` that raises `OSError`.
 
 **Low severity:**
 
-- [ ] `duplicate_finder.py`: files bucketed by size in one pass and
+- [x] `duplicate_finder.py`: an unreadable directory is silently skipped
+      by `rglob()` during the walk with no indication part of the tree
+      wasn't scanned. Not a crash, just a missing log line. **Fixed:**
+      switched to `os.walk(..., onerror=...)`, which does surface this;
+      `main()` now prints a warning per skipped directory and a count at
+      the end; re-verified with a mocked `os.walk` that reports a
+      permission error partway through (chmod-based denial isn't
+      enforceable against this sandbox's root user).
+- [x] `duplicate_finder.py`: files bucketed by size in one pass and
       hashed in a later pass — a file modified between the two passes
       (by another process) produces a stale/incorrect duplicate grouping.
       Only reachable with concurrent external writers during a scan.
-- [ ] `cert_expiry_checker.py`: `parse_host_port()`'s naive
+      **Declined as a fix** — genuinely low severity/low likelihood for
+      this tool's realistic use (pointing it at `~/Downloads`, not a
+      directory under heavy concurrent external write load), and any fix
+      (locking, re-verifying hashes post-grouping) would add real
+      complexity for a race that's already vanishingly unlikely to matter
+      in practice. Left as a documented, accepted limitation.
+- [x] `cert_expiry_checker.py`: `parse_host_port()`'s naive
       `rpartition(":")` misparses bare IPv6 literals (e.g.
       `"2001:db8::1"` silently becomes host `"2001:db8:"` port `1`) —
       reproduced live. Real but unlikely-to-matter for a home-LAN cert
-      checker.
-- [ ] `cert_expiry_checker.py`: no `KeyboardInterrupt` handling, unlike
+      checker. **Fixed:** bracketed (`[ipv6]`, `[ipv6]:port`) and bare
+      multi-colon IPv6 literals are now special-cased before falling
+      back to the port-split logic; re-verified against the exact
+      `"2001:db8::1"` case plus `"::1"` and bracketed forms.
+- [x] `cert_expiry_checker.py`: no `KeyboardInterrupt` handling, unlike
       `log_watcher.py`/`lan_file_server.py` which both catch it and print
       "Stopped." — Ctrl+C during a multi-host scan dumps a raw traceback.
-- [ ] `port_scanner.py`: `--workers 0` (or negative) crashes raw with
+      **Fixed:** the per-host loop is now wrapped in
+      `try/except KeyboardInterrupt`, preserving whatever exit code was
+      accumulated so far; re-verified with a mid-batch interrupt showing
+      partial results and a clean "Stopped." instead of a traceback.
+- [x] `port_scanner.py`: `--workers 0` (or negative) crashes raw with
       `ValueError: max_workers must be greater than 0` — reproduced
-      live. Only reachable via an explicit bad flag value.
-- [ ] `duplicate_finder.py`: an unreadable directory is silently skipped
-      by `rglob()` during the walk with no indication part of the tree
-      wasn't scanned. Not a crash, just a missing log line.
+      live. Only reachable via an explicit bad flag value. **Fixed:**
+      `main()` now validates `--workers >= 1` itself before it ever
+      reaches `ThreadPoolExecutor`, with a friendly `SystemExit`.
 
 **Checked, nothing found** (recorded so these aren't re-investigated):
 race conditions in `port_scanner.py`'s thread pool (each worker only
@@ -178,59 +232,78 @@ both POSIX and Windows separators).
 Findings from a general (non-adversarial) review of all 8 scripts, the
 tests, and the docs. Grouped by priority, not by file.
 
-**Worth doing soon:**
+**Worth doing soon (all done):**
 
-- [ ] `lan_file_server.py`: binding fails with a raw `PermissionError`/
+- [x] `lan_file_server.py`: binding fails with a raw `PermissionError`/
       `OSError` traceback (e.g. `--port 80` without root, or a port
       already in use) instead of the friendly `SystemExit` every other
       script gives for a comparable setup failure. This is the script
-      most likely to be run casually with a bad `--port`.
-- [ ] `chmod +x` all 8 scripts — every one has a `#!/usr/bin/env python3`
+      most likely to be run casually with a bad `--port`. **Fixed**
+      alongside the upload-corruption fix (same commit as the atomic
+      temp-file + rename work).
+- [x] `chmod +x` all 8 scripts — every one has a `#!/usr/bin/env python3`
       shebang but none are actually marked executable, so the shebang is
-      currently dead weight.
-- [ ] Add a CI workflow (e.g. GitHub Actions) running `python3 -m
+      currently dead weight. **Fixed.**
+- [x] Add a CI workflow (e.g. GitHub Actions) running `python3 -m
       unittest` on push. Nearly free, and the suite already exists and
       passes locally — nothing currently enforces it stays that way.
-      (Closes the "no CI" open question below.)
-- [ ] `network_scanner.py`: add an `--ips-only` output mode (one bare IP
+      **Fixed:** `.github/workflows/tests.yml`, runs on push/PR across
+      Python 3.9-3.12.
+- [x] `network_scanner.py`: add an `--ips-only` output mode (one bare IP
       per line). The README already claims it "pairs naturally" with
       `port_scanner.py`, but there's currently no actual mechanism to do
       that (`network_scanner.py` only prints a formatted table,
       `port_scanner.py` takes one positional host). `--ips-only` would
       make `network_scanner.py --ips-only | xargs -n1 port_scanner.py`
-      work today without touching `port_scanner.py` at all.
-- [ ] `--json` output mode for `network_scanner.py` (device list) and
+      work today without touching `port_scanner.py` at all. **Fixed**,
+      including routing informational messages to stderr so the pipe
+      stays clean.
+- [x] `--json` output mode for `network_scanner.py` (device list) and
       `cert_expiry_checker.py` (per-host status) — both have an obvious
       scripting/monitoring consumer and fit the stdlib-only philosophy
-      (`json` is stdlib). Lower value for the other scripts.
+      (`json` is stdlib). Lower value for the other scripts. **Fixed**
+      for both.
 
-**Nice-to-have:**
+**Nice-to-have (all done except one):**
 
-- [ ] `network_scanner.get_local_subnet()` doesn't catch `OSError` the
+- [x] `network_scanner.get_local_subnet()` doesn't catch `OSError` the
       way `lan_file_server.get_lan_ip()` does for the identical "guess my
       LAN IP via a UDP connect() trick" logic — a no-route environment
       crashes one script but not the other for the same operation.
-- [ ] Meaningful exit codes for scripting: `network_scanner.py`,
+      **Fixed:** now returns `None` instead, and `main()` turns that into
+      a friendly `SystemExit`.
+- [x] Meaningful exit codes for scripting: `network_scanner.py`,
       `port_scanner.py`, and `duplicate_finder.py` all exit 0 whether or
       not they found anything, making `if script ...; then` unusable.
       Only `cert_expiry_checker.py` currently has real exit codes.
-- [ ] `KeyboardInterrupt` handling for the scripts whose single run can
-      take a while (`duplicate_finder.py` on a big tree,
-      `network_scanner.py`'s ping sweep, `port_scanner.py` on a large
-      `--ports` range) — they dump a raw traceback on Ctrl+C, unlike the
-      four continuously-running scripts, which all catch it and print
-      "Stopped."
-- [ ] State a minimum Python version somewhere (README or docstrings) —
-      never written down anywhere today.
-- [ ] A `requirements.txt` or `pyproject.toml` collecting the three
+      **Fixed** for all three (see each script's README section for its
+      exact exit-code meaning).
+- [x] `KeyboardInterrupt` handling for `duplicate_finder.py` (on a big
+      tree) and `port_scanner.py` (on a large `--ports` range) — both
+      dumped a raw traceback on Ctrl+C, unlike the four continuously-
+      running scripts, which all catch it and print "Stopped." **Fixed**
+      for both.
+- [ ] `network_scanner.py`'s ping sweep still has no `KeyboardInterrupt`
+      handling — split out from the item above since it wasn't actually
+      fixed. Lower priority than the `duplicate_finder.py`/
+      `port_scanner.py` cases: a ping sweep is bounded by `--max-hosts`
+      and each ping has its own short timeout, so a Ctrl+C here is a
+      shorter wait for a traceback rather than an open-ended one.
+- [x] State a minimum Python version somewhere (README or docstrings) —
+      never written down anywhere today. **Fixed:** README now states
+      3.9+ (matches the CI matrix; nothing in the code actually requires
+      newer syntax, but this is what's actually tested).
+- [x] A `requirements.txt` or `pyproject.toml` collecting the three
       optional deps (`scapy`, `pynetgear`, `rich`) in one installable
       place, instead of only discoverable by reading each script's README
-      section individually.
-- [ ] A small shared smoke test looping over all 8 scripts asserting
+      section individually. **Fixed:** `requirements.txt`.
+- [x] A small shared smoke test looping over all 8 scripts asserting
       `--help` exits 0 — current tests exercise the underlying functions
       thoroughly but don't uniformly exercise the actual argparse wiring
       around them, so a typo'd flag definition (duplicate name, bad
-      `type=`) could in principle slip through.
+      `type=`) could in principle slip through. **Fixed:**
+      `tests/test_smoke_help.py`, discovers and runs every script in the
+      repo root as a real subprocess.
 
 **Considered and declined** (recorded so these don't get re-litigated):
 
