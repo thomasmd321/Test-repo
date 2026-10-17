@@ -26,6 +26,7 @@ import http.server
 import os
 import socket
 import socketserver
+import tempfile
 import urllib.parse
 
 
@@ -94,7 +95,11 @@ class ShareHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(400, str(exc))
             return
 
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length", ""))
+        except ValueError:
+            self.send_error(400, "Missing or invalid Content-Length header")
+            return
         if length <= 0:
             self.send_error(400, "Missing or empty request body")
             return
@@ -104,21 +109,64 @@ class ShareHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         dest = os.path.join(self.directory, name)
-        remaining = length
-        with open(dest, "wb") as f:
-            while remaining > 0:
-                chunk = self.rfile.read(min(65536, remaining))
-                if not chunk:
-                    break  # client disconnected early; file is left short, not corrupted-looking
-                f.write(chunk)
-                remaining -= len(chunk)
 
-        body = f"Uploaded {name} ({length} bytes)\n".encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        # Stream into a private temp file in the same directory (so the
+        # os.replace() below is an atomic same-filesystem rename), and
+        # only replace the real destination once the FULL declared body
+        # has arrived. This one pattern closes three separate problems
+        # at once: concurrent uploads of the same filename can't
+        # interleave/corrupt each other (each writes its own temp file,
+        # never shares a file descriptor or offset); a concurrent GET of
+        # the destination can never observe a half-written file
+        # (os.replace() is atomic -- readers see either the old complete
+        # file or the new one, never something in between); and a client
+        # that disconnects mid-upload never leaves a truncated file under
+        # the real filename, nor gets a false "upload complete" response
+        # for one.
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=self.directory, prefix=".upload-")
+        bytes_written = 0
+        incomplete = False
+        try:
+            with os.fdopen(tmp_fd, "wb") as f:
+                remaining = length
+                while remaining > 0:
+                    chunk = self.rfile.read(min(65536, remaining))
+                    if not chunk:
+                        break  # client disconnected before sending everything
+                    f.write(chunk)
+                    bytes_written += len(chunk)
+                    remaining -= len(chunk)
+
+            incomplete = bytes_written != length
+            if not incomplete:
+                os.replace(tmp_path, dest)
+                tmp_path = None  # moved into place; don't delete it below
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+        # The file handling above is already done and correct either way
+        # (temp file cleaned up, or moved into place) by this point --
+        # everything from here is just telling the client about it, which
+        # can itself fail if the client already disconnected. That's
+        # benign (nothing meaningful to tell a client that's gone) and
+        # shouldn't dump a traceback to stderr, which would defeat the
+        # point of log_message() being overridden to stay quiet above.
+        try:
+            if incomplete:
+                self.send_error(400, f"Upload incomplete: received {bytes_written} of {length} bytes")
+                return
+            body = f"Uploaded {name} ({length} bytes)\n".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self):
         if self.path == "/upload-form" and getattr(self.server, "allow_upload", False):
@@ -160,7 +208,15 @@ def main():
     if not os.path.isdir(args.directory):
         raise SystemExit(f"{args.directory!r} is not a directory")
 
-    server = make_server(os.path.abspath(args.directory), args.bind, args.port, args.allow_upload, args.max_upload_size)
+    try:
+        server = make_server(os.path.abspath(args.directory), args.bind, args.port, args.allow_upload, args.max_upload_size)
+    except PermissionError:
+        raise SystemExit(
+            f"Permission denied binding to {args.bind}:{args.port}.\n"
+            "(Ports below 1024 need root/Administrator -- try a higher --port instead.)"
+        )
+    except OSError as exc:
+        raise SystemExit(f"Could not bind to {args.bind}:{args.port}: {exc}")
 
     lan_url = f"http://{get_lan_ip()}:{args.port}/"
     print(f"Serving {os.path.abspath(args.directory)}")

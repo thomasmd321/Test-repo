@@ -156,6 +156,61 @@ class TestUploadEnabled(LiveServerTestCase):
         resp = urllib.request.urlopen(self.url("/upload-form"), timeout=2)
         self.assertIn(b"Upload a file", resp.read())
 
+    def test_malformed_content_length_is_400_not_a_crash(self):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            conn.putrequest("POST", "/upload?name=bad.txt")
+            conn.putheader("Content-Length", "notanumber")
+            conn.endheaders()
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 400)
+        finally:
+            conn.close()
+        self.assertFalse((self.served_dir / "bad.txt").exists())
+
+    def test_disconnect_mid_upload_leaves_no_file_under_real_name(self):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        conn.putrequest("POST", "/upload?name=partial.txt")
+        conn.putheader("Content-Length", "1000")
+        conn.endheaders()
+        conn.send(b"only 10 b")
+        conn.close()
+        time.sleep(0.3)
+        self.assertFalse((self.served_dir / "partial.txt").exists())
+        # the private temp file must be cleaned up too, not left as debris
+        self.assertEqual(list(self.served_dir.glob(".upload-*")), [])
+
+    def test_concurrent_uploads_of_same_filename_never_corrupt(self):
+        """The core fix: two simultaneous uploads to the same filename must
+        never interleave/corrupt, and the file on disk must always be
+        wholly one payload or the other -- never a partial mix, and never
+        silently missing data while both requests report success."""
+        import threading as _threading
+        payload_a, payload_b = b"A" * 50000, b"B" * 50000
+
+        def upload(payload, results, idx):
+            req = urllib.request.Request(
+                self.url("/upload?name=same.txt"), data=payload, method="POST",
+            )
+            resp = urllib.request.urlopen(req, timeout=5)
+            results[idx] = resp.status
+
+        for _ in range(5):
+            results = [None, None]
+            t1 = _threading.Thread(target=upload, args=(payload_a, results, 0))
+            t2 = _threading.Thread(target=upload, args=(payload_b, results, 1))
+            t1.start(); t2.start()
+            t1.join(); t2.join()
+            self.assertEqual(results, [200, 200])
+
+            final = (self.served_dir / "same.txt").read_bytes()
+            self.assertEqual(len(final), 50000)
+            is_pure_a = final.count(b"A") == 50000 and final.count(b"B") == 0
+            is_pure_b = final.count(b"B") == 50000 and final.count(b"A") == 0
+            self.assertTrue(is_pure_a or is_pure_b, f"corrupted/interleaved file: {final.count(b'A')} A, {final.count(b'B')} B")
+
 
 class TestMainValidation(unittest.TestCase):
     def test_nonexistent_directory_gives_friendly_error(self):
@@ -164,6 +219,23 @@ class TestMainValidation(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 m.main()
         self.assertIn("not a directory", str(ctx.exception))
+
+    def test_permission_error_at_bind_gives_friendly_error(self):
+        import sys
+        with mock.patch.object(sys, "argv", ["lan_file_server.py", "--port", "80"]), \
+             mock.patch.object(m, "make_server", side_effect=PermissionError("Permission denied")):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertIn("Permission denied", str(ctx.exception))
+        self.assertIn("root", str(ctx.exception))
+
+    def test_address_in_use_gives_friendly_error(self):
+        import sys
+        with mock.patch.object(sys, "argv", ["lan_file_server.py"]), \
+             mock.patch.object(m, "make_server", side_effect=OSError("Address already in use")):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertIn("Address already in use", str(ctx.exception))
 
 
 if __name__ == "__main__":
