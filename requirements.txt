@@ -1,0 +1,16 @@
+# Optional third-party dependencies for this repo's standalone scripts.
+# Every script works with just the Python standard library; these only
+# unlock extra features and are loaded with a friendly error message
+# (not a traceback) when missing. Install only what you need, or all of
+# it with: pip install -r requirements.txt
+#
+# scapy     -- network_scanner.py (--source-free ARP scan), bandwidth_dashboard.py
+#              (--source sniff), arp_spoof_detector.py (passive sniffing).
+#              Needs root/CAP_NET_RAW to actually send/receive raw packets.
+# pynetgear -- bandwidth_dashboard.py --source netgear (polls a Netgear
+#              router's local SOAP API instead of sniffing).
+# rich      -- bandwidth_dashboard.py's live-updating table. Falls back to
+#              a plain periodic text summary when not installed.
+scapy>=2.5
+pynetgear>=0.10
+rich>=13.0
