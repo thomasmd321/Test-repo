@@ -5,6 +5,14 @@ script is self-contained (stdlib plus one or two optional third-party
 packages) and only observes — none of them alter, redirect, or throttle
 anyone's traffic.
 
+| Tool | What it does |
+| --- | --- |
+| [`network_scanner.py`](#network_scannerpy) | Discovers devices on the local subnet (ARP scan / ping sweep) |
+| [`bandwidth_dashboard.py`](#bandwidth_dashboardpy) | Live per-device bandwidth view (sniff / conntrack / Netgear sources) |
+| [`arp_spoof_detector.py`](#arp_spoof_detectorpy) | Alerts on ARP cache poisoning; can repair a poisoned entry |
+
+See [`TODO.md`](TODO.md) for ideas that haven't been built yet.
+
 ## network_scanner.py
 
 Discovers devices on the local network.
