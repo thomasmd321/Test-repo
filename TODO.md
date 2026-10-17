@@ -68,6 +68,111 @@
       of `python`/`python3` (the bare `python` form silently fails on
       systems where it isn't mapped to Python 3).
 
+## Bugs found by devil's-advocate review (not yet fixed)
+
+A second adversarial pass, covering the five newer scripts (the earlier
+pass above only covered `network_scanner.py`/`bandwidth_dashboard.py`/
+`arp_spoof_detector.py`, and those findings are already fixed). Every
+item below was verified by reading the actual implementation — several
+also by a live reproduction against a throwaway test file/server, noted
+per item — not just asserted. Grouped by severity, most severe first.
+
+**High severity:**
+
+- [ ] `log_watcher.py`: `LogWatcher._buffer` grows unboundedly if a line
+      never terminates with `\n` — reproduced live (5× 100KB unterminated
+      appends grew the buffer 100k→500k with zero lines ever flushed).
+      Realistic trigger: a crashed/hung writer, a binary file pointed at
+      by mistake, or any app streaming a large blob without a newline.
+      Real OOM risk for an hours-long unattended watch.
+- [ ] `lan_file_server.py`: concurrent uploads of the same filename
+      silently clobber each other with no locking — reproduced live, two
+      simultaneous uploads (all-A vs all-B) both returned HTTP 200
+      success, but the file on disk ended up as pure B with 0 bytes of A.
+      Byte-level interleaving/corruption is also possible depending on
+      timing, not just last-write-wins, since both writers hold
+      independent fd offsets on the same truncated inode.
+- [ ] `lan_file_server.py`: a GET racing a concurrent upload of the same
+      file can silently return content that didn't exist when the
+      request was made — reproduced live (a GET for an existing 50MB
+      file returned a concurrently-uploaded 1000-byte replacement
+      instead). A mid-copy truncate can also produce a response shorter
+      than its declared Content-Length. No synchronization exists between
+      the GET and POST paths.
+
+**Medium severity:**
+
+- [ ] `cert_expiry_checker.py`: one malformed host spec in a list or
+      `--file` aborts the entire batch — `parse_host_port()` is called
+      unguarded in `main()` (unlike `check_host()`, which wraps per-host
+      failures), so a single bad line kills checking every other host.
+      Reproduced live.
+- [ ] `lan_file_server.py`: a malformed `Content-Length` header (e.g. a
+      non-numeric value) crashes the request handler with an uncaught
+      `ValueError` instead of a 400 — reproduced live; also spams a full
+      traceback to stderr despite the handler's `log_message` override
+      being meant to keep the server quiet.
+- [ ] `lan_file_server.py`: on a mid-upload client disconnect, the
+      success response still reports the originally-declared length
+      instead of the actual bytes written, and the short/truncated file
+      is left on disk under its real filename with no indication it's
+      incomplete (no temp-file + atomic-rename pattern).
+- [ ] `duplicate_finder.py`: `--delete`'s `path.unlink()` and the re-stat
+      in `main()` are unguarded (unlike every other filesystem touch in
+      the file, which carefully catches `OSError`) — a permission error
+      or a file disappearing mid-delete crashes the whole run partway
+      through, with some duplicate groups deleted and others untouched
+      and no summary of what succeeded. The re-stat is also redundant
+      (size is already known from the earlier grouping pass).
+- [ ] `lan_file_server.py`: Ctrl+C during an in-flight upload kills that
+      thread mid-write with no atomicity — `daemon_threads = True` means
+      `server_close()`'s thread-join is a no-op (verified against
+      `socketserver` source), so shutdown doesn't wait for in-flight
+      requests. Leaves a truncated file under the real filename.
+- [ ] `log_watcher.py`: if the watched file is deleted and never
+      recreated (not rotated, just gone), the watcher silently polls the
+      stale fd forever, returning zero new lines with no warning that
+      monitoring has effectively gone blind — reproduced live. Defeats
+      the tool's purpose without any signal, for an hours-long
+      unattended watch.
+- [ ] `log_watcher.py`: only the rotation-check's `FileNotFoundError` is
+      caught; a transient `OSError` from reopening after rotation, or
+      from the per-poll `read()` itself (permission change,
+      removable/network media hiccup), propagates uncaught and kills the
+      whole watcher.
+
+**Low severity:**
+
+- [ ] `duplicate_finder.py`: files bucketed by size in one pass and
+      hashed in a later pass — a file modified between the two passes
+      (by another process) produces a stale/incorrect duplicate grouping.
+      Only reachable with concurrent external writers during a scan.
+- [ ] `cert_expiry_checker.py`: `parse_host_port()`'s naive
+      `rpartition(":")` misparses bare IPv6 literals (e.g.
+      `"2001:db8::1"` silently becomes host `"2001:db8:"` port `1`) —
+      reproduced live. Real but unlikely-to-matter for a home-LAN cert
+      checker.
+- [ ] `cert_expiry_checker.py`: no `KeyboardInterrupt` handling, unlike
+      `log_watcher.py`/`lan_file_server.py` which both catch it and print
+      "Stopped." — Ctrl+C during a multi-host scan dumps a raw traceback.
+- [ ] `port_scanner.py`: `--workers 0` (or negative) crashes raw with
+      `ValueError: max_workers must be greater than 0` — reproduced
+      live. Only reachable via an explicit bad flag value.
+- [ ] `duplicate_finder.py`: an unreadable directory is silently skipped
+      by `rglob()` during the walk with no indication part of the tree
+      wasn't scanned. Not a crash, just a missing log line.
+
+**Checked, nothing found** (recorded so these aren't re-investigated):
+race conditions in `port_scanner.py`'s thread pool (each worker only
+touches its own local socket); memory growth in `lan_file_server.py` /
+`cert_expiry_checker.py` / `port_scanner.py` / `duplicate_finder.py`
+(verified against `socketserver` source that `daemon_threads=True` means
+finished request threads are never retained); GET-path traversal in
+`lan_file_server.py` (falls through to stdlib's hardened
+`SimpleHTTPRequestHandler`); upload-filename traversal
+(`safe_upload_name()` correctly strips `.`/`..`/directory components on
+both POSIX and Windows separators).
+
 ## Possible improvements
 
 Findings from a general (non-adversarial) review of all 8 scripts, the
