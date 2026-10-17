@@ -135,13 +135,17 @@ class TestRealTlsHandshake(unittest.TestCase):
                 conn, _ = raw_server.accept()
             except OSError:
                 return
+            tls_conn = None
             try:
                 tls_conn = server_ctx.wrap_socket(conn, server_side=True)
                 tls_conn.recv(1)
             except (ssl.SSLError, OSError):
                 pass
             finally:
-                conn.close()
+                # Close the TLS wrapper, not the raw socket it wraps --
+                # closing only `conn` left the SSLSocket object itself
+                # unclosed, which fires a ResourceWarning at GC time.
+                (tls_conn or conn).close()
 
         thread = threading.Thread(target=serve_once, daemon=True)
         thread.start()
