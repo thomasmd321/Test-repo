@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 import unittest
+import unittest.mock as mock
 from pathlib import Path
 
 import log_watcher as m
@@ -41,8 +42,8 @@ class LogWatcherTestCase(unittest.TestCase):
         for w in self._watchers:
             w.close()
 
-    def make_watcher(self, from_start=False):
-        w = m.LogWatcher(str(self.log_path), from_start=from_start)
+    def make_watcher(self, from_start=False, max_line_bytes=m.DEFAULT_MAX_LINE_BYTES):
+        w = m.LogWatcher(str(self.log_path), from_start=from_start, max_line_bytes=max_line_bytes)
         self._watchers.append(w)
         return w
 
@@ -105,6 +106,94 @@ class TestRotationHandling(LogWatcherTestCase):
             f.write("line 2\n")
         w.poll_new_lines()
         self.assertEqual(w._inode, original_inode)  # should not have reopened
+
+
+class TestBoundedBuffer(LogWatcherTestCase):
+    def test_unterminated_line_flushes_at_the_cap_instead_of_growing_forever(self):
+        self.log_path.write_text("")
+        w = self.make_watcher(from_start=True, max_line_bytes=1000)
+        with self.log_path.open("a") as f:
+            f.write("x" * 5000)  # far past the cap, never terminated
+        lines = w.poll_new_lines()
+        self.assertEqual(len(w._buffer), 0)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("truncated", lines[0])
+        self.assertGreater(len(lines[0]), 4900)  # the content itself is preserved, just marked
+
+    def test_normal_terminated_lines_are_unaffected_by_the_cap(self):
+        self.log_path.write_text("")
+        w = self.make_watcher(from_start=True, max_line_bytes=1000)
+        with self.log_path.open("a") as f:
+            f.write("short line one\nshort line two\n")
+        self.assertEqual(w.poll_new_lines(), ["short line one", "short line two"])
+
+    def test_buffer_stays_bounded_under_sustained_unterminated_writes(self):
+        """Reproduces the original finding directly: repeated large
+        unterminated appends must never let the buffer grow past the cap."""
+        self.log_path.write_text("")
+        w = self.make_watcher(from_start=True)  # default 1 MiB cap
+        for _ in range(15):  # 15 * 100KB = 1.5MB of content, no newlines
+            with self.log_path.open("a") as f:
+                f.write("x" * 100_000)
+            w.poll_new_lines()
+            self.assertLess(len(w._buffer), m.DEFAULT_MAX_LINE_BYTES)
+
+
+class TestFileMissing(LogWatcherTestCase):
+    def test_false_while_file_exists(self):
+        self.log_path.write_text("hello\n")
+        w = self.make_watcher(from_start=False)
+        self.assertFalse(w.file_missing())
+
+    def test_true_after_deletion_and_false_again_after_recreation(self):
+        self.log_path.write_text("hello\n")
+        w = self.make_watcher(from_start=False)
+        self.log_path.unlink()
+        self.assertTrue(w.file_missing())
+        # must not crash while polling a deleted file
+        self.assertEqual(w.poll_new_lines(), [])
+        self.log_path.write_text("")
+        self.assertFalse(w.file_missing())
+
+    def test_main_loop_warns_exactly_once_per_transition(self):
+        """Exercises main()'s own missing/present transition logic (not
+        just LogWatcher.file_missing()) to confirm it doesn't spam a
+        warning every poll cycle while the file stays missing."""
+        self.log_path.write_text("")
+        w = self.make_watcher(from_start=False)
+        printed = []
+        was_missing = False
+
+        def one_cycle():
+            nonlocal was_missing
+            now_missing = w.file_missing()
+            if now_missing and not was_missing:
+                printed.append("missing")
+            elif was_missing and not now_missing:
+                printed.append("back")
+            was_missing = now_missing
+            w.poll_new_lines()
+
+        for _ in range(3):
+            one_cycle()
+        self.log_path.unlink()
+        for _ in range(5):
+            one_cycle()
+        self.log_path.write_text("")
+        for _ in range(3):
+            one_cycle()
+
+        self.assertEqual(printed.count("missing"), 1)
+        self.assertEqual(printed.count("back"), 1)
+
+
+class TestTransientErrorHandling(LogWatcherTestCase):
+    def test_oserror_during_read_is_swallowed_not_crashed(self):
+        self.log_path.write_text("hello\n")
+        w = self.make_watcher(from_start=True)
+        with mock.patch.object(w._fh, "read", side_effect=OSError("simulated I/O error")):
+            result = w.poll_new_lines()
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":
