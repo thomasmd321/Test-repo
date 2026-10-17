@@ -26,7 +26,12 @@ scanning requires.
 python network_scanner.py                 # auto-detect local subnet
 python network_scanner.py 192.168.1.0/24   # scan a specific subnet
 python network_scanner.py --timeout 2
+python network_scanner.py --max-hosts 10000 10.0.0.0/20   # override the size guard
 ```
+
+Refuses to scan a subnet larger than `--max-hosts` addresses (default 4096)
+as a safety net against typos like `/8` instead of `/24`, which would
+otherwise try to sweep millions of hosts at once.
 
 Optional dependency: `scapy` (for the faster ARP scan; falls back to
 `ping`/`arp` otherwise).
@@ -167,6 +172,7 @@ again.
 | --- | --- |
 | `--interface IFACE` | Interface to watch (default: scapy's default) |
 | `--flap-window SECONDS` | How fast a MAC change is treated as suspicious (default: 10) |
+| `--stale-after SECONDS` | Forget an ip after this many idle seconds, to bound memory use on a long-running watch (default: 300) |
 | `--pin IP=MAC` | A mapping to enforce; repeatable |
 | `--repair IP=MAC` | Pin one mapping via the OS static-ARP command and exit |
 | `--windows-interface NAME` | [Windows only] adapter name for `--repair` (default: `Ethernet`) |

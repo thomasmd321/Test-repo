@@ -101,12 +101,13 @@ class Stats:
             self.received[dst] += size
 
     def hostname_for(self, ip: str) -> str:
-        if ip not in self.hostnames:
-            try:
-                self.hostnames[ip] = socket.gethostbyaddr(ip)[0]
-            except (socket.herror, socket.gaierror):
-                self.hostnames[ip] = ""
-        return self.hostnames[ip]
+        with self.lock:
+            if ip not in self.hostnames:
+                try:
+                    self.hostnames[ip] = socket.gethostbyaddr(ip)[0]
+                except (socket.herror, socket.gaierror):
+                    self.hostnames[ip] = ""
+            return self.hostnames[ip]
 
     def snapshot_and_reset(self):
         with self.lock:
@@ -172,12 +173,23 @@ def conntrack_totals(text: str):
     return dict(sent), dict(received)
 
 
-def read_conntrack(host: str = None, ssh_port: int = 22) -> str:
+def read_conntrack(host: str = None, ssh_port: int = 22, timeout: float = 10.0) -> str:
     if host:
-        command = ["ssh", "-p", str(ssh_port), host, "cat /proc/net/nf_conntrack"]
+        # BatchMode=yes: fail immediately instead of prompting (host-key
+        # confirmation, password auth) -- a prompt here would otherwise hang
+        # the process indefinitely, hidden behind the live-updating display.
+        command = [
+            "ssh", "-p", str(ssh_port),
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=5",
+            host, "cat /proc/net/nf_conntrack",
+        ]
     else:
         command = ["cat", "/proc/net/nf_conntrack"]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Timed out after {timeout}s reading conntrack table from {host or 'localhost'}")
     if result.returncode != 0:
         raise RuntimeError(f"Failed to read conntrack table: {result.stderr.strip()}")
     return result.stdout
@@ -228,8 +240,18 @@ def run_sniff_source(args, stats: Stats):
     if conf is None:
         raise SystemExit("--source sniff requires scapy: pip install scapy")
 
+    # error: populated by the sniffer thread if sniff() raises (e.g. a
+    # PermissionError from running without root). Without this, the thread
+    # would die silently -- the default thread excepthook just prints a
+    # traceback to stderr -- while the main loop kept polling and showing
+    # "(no traffic observed yet)" forever, looking like it's still working.
+    error = {}
+
     def sniffer():
-        sniff(iface=args.interface, prn=stats.record, store=False)
+        try:
+            sniff(iface=args.interface, prn=stats.record, store=False)
+        except Exception as exc:
+            error["exc"] = exc
 
     thread = threading.Thread(target=sniffer, daemon=True)
     thread.start()
@@ -242,6 +264,13 @@ def run_sniff_source(args, stats: Stats):
 
     def poll():
         time.sleep(args.interval)
+        if "exc" in error:
+            raise SystemExit(
+                f"Sniffing failed: {error['exc']}\n"
+                "(Are you running with sudo/Administrator privileges?)"
+            )
+        if not thread.is_alive():
+            raise SystemExit("Sniffing stopped unexpectedly.")
         return stats.snapshot_and_reset()
 
     return poll
@@ -260,7 +289,14 @@ def run_conntrack_source(args, stats: Stats):
     def poll():
         nonlocal previous_sent, previous_received
         time.sleep(args.interval)
-        text = read_conntrack(args.host, args.ssh_port)
+        try:
+            text = read_conntrack(args.host, args.ssh_port)
+        except RuntimeError as exc:
+            raise SystemExit(
+                f"{exc}\n"
+                "(Make sure net.netfilter.nf_conntrack_acct=1 is set on the router, "
+                "and that you have permission to read /proc/net/nf_conntrack.)"
+            )
         total_sent, total_received = conntrack_totals(text)
         sent = diff_totals(previous_sent, total_sent)
         received = diff_totals(previous_received, total_received)
@@ -294,17 +330,18 @@ def build_netgear_table(devices: list, traffic_meter: dict):
         table.add_column("IP")
         table.add_column("Name")
         table.add_column("MAC")
-        table.add_column("Band")
+        table.add_column("SSID")
+        table.add_column("Link Type")
         table.add_column("Link Rate", justify="right")
         for d in devices:
-            table.add_row(d.ip or "-", d.name or "-", d.mac or "-", d.ssid or "-", f"{d.link_rate} Mbps" if d.link_rate else "-")
+            table.add_row(d.ip or "-", d.name or "-", d.mac or "-", d.ssid or "-", d.type or "-", f"{d.link_rate} Mbps" if d.link_rate else "-")
         return table, meter_line
 
     lines = ["\nAttached devices (link rate is a ceiling, not live usage)", "-" * 72]
-    lines.append(f"{'IP':<16}{'Name':<20}{'MAC':<20}{'Band':<10}Link Rate")
+    lines.append(f"{'IP':<16}{'Name':<20}{'MAC':<20}{'SSID':<12}{'Link Type':<12}Link Rate")
     for d in devices:
         rate = f"{d.link_rate} Mbps" if d.link_rate else "-"
-        lines.append(f"{(d.ip or '-'):<16}{(d.name or '-'):<20}{(d.mac or '-'):<20}{(d.ssid or '-'):<10}{rate}")
+        lines.append(f"{(d.ip or '-'):<16}{(d.name or '-'):<20}{(d.mac or '-'):<20}{(d.ssid or '-'):<12}{(d.type or '-'):<12}{rate}")
     if not devices:
         lines.append("(no devices reported)")
     return "\n".join(lines), meter_line

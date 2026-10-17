@@ -34,10 +34,17 @@ class FlapDetector:
 
     # flap_window: seconds -- a MAC change faster than this is suspicious
     # pinned:      optional {ip: mac} ground truth supplied by the operator
-    def __init__(self, flap_window: float = 10.0, pinned: dict = None):
+    # stale_after: seconds of inactivity before an ip is forgotten. Without
+    #   this, last_seen grows one entry per unique source IP forever -- and
+    #   since this tool watches for exactly the traffic an attacker who
+    #   spoofs many forged source IPs would generate, that growth is
+    #   adversarially exploitable, not just a theoretical long-run leak.
+    def __init__(self, flap_window: float = 10.0, pinned: dict = None, stale_after: float = 300.0):
         self.flap_window = flap_window
         self.pinned = pinned or {}
         self.last_seen = {}   # state: ip -> (mac, timestamp) memory
+        self.stale_after = stale_after
+        self._observations_since_prune = 0
 
     # ip, mac: sender fields from one incoming ARP reply
     # now:     current time (seconds), e.g. from time.time()
@@ -54,6 +61,7 @@ class FlapDetector:
         # (both None the first time this ip is ever seen)
         prev_mac, prev_time = self.last_seen.get(ip, (None, None))
         self.last_seen[ip] = (mac, now)   # remember this sighting either way
+        self._prune_if_due(now)
 
         if prev_mac and prev_mac != mac and (now - prev_time) < self.flap_window:
             # MAC changed, and changed faster than flap_window allows
@@ -62,6 +70,18 @@ class FlapDetector:
                 f"to {mac} after {now - prev_time:.1f}s"
             )
         return None   # nothing suspicious about this reply
+
+    def _prune_if_due(self, now: float):
+        """Forget ips idle longer than stale_after, so last_seen stays
+        bounded by recent activity instead of growing for the life of the
+        process. Amortized: only sweeps every 1000 observations."""
+        self._observations_since_prune += 1
+        if self._observations_since_prune < 1000:
+            return
+        self._observations_since_prune = 0
+        stale_ips = [ip for ip, (_, seen_at) in self.last_seen.items() if now - seen_at > self.stale_after]
+        for ip in stale_ips:
+            del self.last_seen[ip]
 
 
 # detector: the FlapDetector instance to feed; returns a scapy-compatible
@@ -101,6 +121,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--interface", help="Interface to watch (default: scapy's default)")
     parser.add_argument("--flap-window", type=float, default=10.0, help="Seconds within which a MAC change is treated as suspicious (default: 10)")
+    parser.add_argument("--stale-after", type=float, default=300.0, help="Forget an ip after this many idle seconds, to bound memory use (default: 300)")
     parser.add_argument("--pin", action="append", default=[], metavar="IP=MAC", help="A mapping to enforce, e.g. 192.168.1.1=aa:bb:cc:11:22:33 (repeatable)")
     parser.add_argument("--repair", metavar="IP=MAC", help="Pin one mapping via the OS static-ARP command and exit, instead of watching traffic")
     parser.add_argument("--windows-interface", default="Ethernet", help="[Windows only] adapter name for --repair (default: Ethernet)")
@@ -120,7 +141,7 @@ def main():
 
     # pinned: turn ["ip=mac", ...] from --pin into a {ip: mac} dict
     pinned = dict(parse_ip_mac(p) for p in args.pin)
-    detector = FlapDetector(flap_window=args.flap_window, pinned=pinned)
+    detector = FlapDetector(flap_window=args.flap_window, pinned=pinned, stale_after=args.stale_after)
 
     print(f"Watching ARP replies on {args.interface or 'default interface'} ... Ctrl+C to stop.")
     if pinned:
@@ -133,6 +154,11 @@ def main():
         sniff(iface=args.interface, filter="arp", prn=make_callback(detector), store=False)
     except KeyboardInterrupt:
         print("\nStopped.")
+    except PermissionError:
+        raise SystemExit(
+            "Permission denied opening the capture interface.\n"
+            "(Are you running with sudo/Administrator privileges?)"
+        )
 
 
 if __name__ == "__main__":

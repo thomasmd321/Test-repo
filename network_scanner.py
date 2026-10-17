@@ -20,6 +20,12 @@ import socket
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Sane upper bound for a single sequential scan (~a /20). Without this, a
+# typo'd subnet like /8 would silently try to sweep millions of hosts --
+# allocating a Future per address up front -- and hang or exhaust memory
+# before producing any output.
+DEFAULT_MAX_HOSTS = 4096
+
 
 def get_local_subnet() -> str:
     """Guess the local /24 subnet from the host's primary network interface."""
@@ -105,7 +111,8 @@ def scan(subnet: str, timeout: float):
     """Scan the subnet, preferring an ARP scan and falling back to a ping sweep."""
     try:
         return arp_scan(subnet, timeout)
-    except (ImportError, PermissionError, OSError):
+    except Exception as exc:
+        print(f"ARP scan unavailable ({exc}); falling back to ping sweep.")
         return ping_sweep(subnet, timeout)
 
 
@@ -113,9 +120,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("subnet", nargs="?", help="Subnet to scan in CIDR notation, e.g. 192.168.1.0/24")
     parser.add_argument("--timeout", type=float, default=1.0, help="Timeout in seconds per host (default: 1.0)")
+    parser.add_argument(
+        "--max-hosts", type=int, default=DEFAULT_MAX_HOSTS,
+        help=f"Refuse to scan a subnet larger than this many addresses, as a safety net "
+             f"against typos like /8 (default: {DEFAULT_MAX_HOSTS})",
+    )
     args = parser.parse_args()
 
     subnet = args.subnet or get_local_subnet()
+
+    try:
+        network = ipaddress.ip_network(subnet, strict=False)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid subnet {subnet!r}: {exc}")
+
+    if network.num_addresses > args.max_hosts:
+        raise SystemExit(
+            f"{subnet} has {network.num_addresses} addresses, more than --max-hosts "
+            f"({args.max_hosts}). This is almost always a typo (e.g. /8 instead of /24).\n"
+            "Scan a smaller subnet, or pass --max-hosts to override."
+        )
+
     print(f"Scanning {subnet} ...")
 
     devices = scan(subnet, args.timeout)
