@@ -7,7 +7,10 @@ Covers pure logic and anything mockable without a real network, a real
 privileged socket, or scapy actually being installed. Nothing here sends
 real ping/ARP traffic.
 """
+import contextlib
+import io
 import ipaddress
+import json
 import sys
 import unittest
 import unittest.mock as mock
@@ -116,6 +119,55 @@ class TestMainSubnetGuard(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 m.main()
         self.assertIn("Could not auto-detect", str(ctx.exception))
+
+
+class TestOutputModes(unittest.TestCase):
+    DEVICES = [
+        {"ip": "192.168.1.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "nas.local"},
+        {"ip": "192.168.1.2", "mac": "", "hostname": ""},
+    ]
+
+    def test_ips_only_prints_one_bare_ip_per_line(self):
+        with mock.patch.object(sys, "argv", ["network_scanner.py", "192.168.1.0/30", "--ips-only"]), \
+             mock.patch.object(m, "scan", return_value=self.DEVICES):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.main()
+        self.assertEqual(buf.getvalue().splitlines(), ["192.168.1.5", "192.168.1.2"])
+
+    def test_json_mode_prints_a_valid_json_array_of_the_device_list(self):
+        with mock.patch.object(sys, "argv", ["network_scanner.py", "192.168.1.0/30", "--json"]), \
+             mock.patch.object(m, "scan", return_value=self.DEVICES):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.main()
+        self.assertEqual(json.loads(buf.getvalue()), self.DEVICES)
+
+    def test_ips_only_and_json_are_mutually_exclusive(self):
+        with mock.patch.object(sys, "argv", ["network_scanner.py", "--ips-only", "--json"]):
+            with self.assertRaises(SystemExit):
+                m.main()
+
+    def test_status_messages_go_to_stderr_not_stdout_in_machine_readable_modes(self):
+        """The whole point of --ips-only/--json is piping stdout straight
+        into another tool -- a "Scanning ..." line mixed into stdout would
+        corrupt that output."""
+        with mock.patch.object(sys, "argv", ["network_scanner.py", "192.168.1.0/30", "--ips-only"]), \
+             mock.patch.object(m, "scan", return_value=self.DEVICES):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                m.main()
+        self.assertIn("Scanning", err.getvalue())
+        self.assertNotIn("Scanning", out.getvalue())
+
+    def test_arp_scan_result_includes_hostname_key_for_schema_consistency(self):
+        """arp_scan() devices must carry the same keys as ping_sweep()
+        devices so --json output has a uniform schema regardless of which
+        scan method actually ran."""
+        fake_received = mock.Mock(psrc="192.168.1.9", hwsrc="aa:bb:cc:11:22:33")
+        with mock.patch("scapy.all.srp", return_value=([(None, fake_received)], None)):
+            devices = m.arp_scan("192.168.1.0/30", timeout=0.1)
+        self.assertEqual(devices, [{"ip": "192.168.1.9", "mac": "aa:bb:cc:11:22:33", "hostname": ""}])
 
 
 class TestExitCodes(unittest.TestCase):

@@ -10,12 +10,16 @@ Usage:
     python network_scanner.py                 # auto-detect local subnet
     python network_scanner.py 192.168.1.0/24   # scan a specific subnet
     python network_scanner.py --timeout 2
+    python network_scanner.py --ips-only           # one bare IP per line
+    python network_scanner.py --ips-only | xargs -n1 port_scanner.py
+    python network_scanner.py --json
 
 Exit code is 0 if at least one device was found, 1 if none were.
 """
 
 import argparse
 import ipaddress
+import json
 import platform
 import re
 import socket
@@ -55,7 +59,10 @@ def arp_scan(subnet: str, timeout: float):
 
     devices = []
     for _, received in answered:
-        devices.append({"ip": received.psrc, "mac": received.hwsrc})
+        # "hostname" is always "" here (ARP doesn't resolve names), but the
+        # key is still present so callers -- --json in particular -- see
+        # the same device schema regardless of which scan method ran.
+        devices.append({"ip": received.psrc, "mac": received.hwsrc, "hostname": ""})
     return sorted(devices, key=lambda d: ipaddress.ip_address(d["ip"]))
 
 
@@ -117,12 +124,14 @@ def ping_sweep(subnet: str, timeout: float, max_workers: int = 100):
     return sorted(devices, key=lambda d: ipaddress.ip_address(d["ip"]))
 
 
-def scan(subnet: str, timeout: float):
-    """Scan the subnet, preferring an ARP scan and falling back to a ping sweep."""
+def scan(subnet: str, timeout: float, log=print):
+    """Scan the subnet, preferring an ARP scan and falling back to a ping
+    sweep. Status messages go through log() rather than a bare print()
+    so machine-readable output modes can redirect them off stdout."""
     try:
         return arp_scan(subnet, timeout)
     except Exception as exc:
-        print(f"ARP scan unavailable ({exc}); falling back to ping sweep.")
+        log(f"ARP scan unavailable ({exc}); falling back to ping sweep.")
         return ping_sweep(subnet, timeout)
 
 
@@ -135,7 +144,15 @@ def main():
         help=f"Refuse to scan a subnet larger than this many addresses, as a safety net "
              f"against typos like /8 (default: {DEFAULT_MAX_HOSTS})",
     )
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument("--ips-only", action="store_true", help="Print one bare IP per line instead of a table, for piping into another tool (e.g. port_scanner.py)")
+    output_group.add_argument("--json", action="store_true", help="Print the device list as a JSON array instead of a table")
     args = parser.parse_args()
+
+    machine_readable = args.ips_only or args.json
+
+    def status(msg):
+        print(msg, file=sys.stderr if machine_readable else sys.stdout)
 
     subnet = args.subnet or get_local_subnet()
     if subnet is None:
@@ -156,19 +173,25 @@ def main():
             "Scan a smaller subnet, or pass --max-hosts to override."
         )
 
-    print(f"Scanning {subnet} ...")
+    status(f"Scanning {subnet} ...")
 
-    devices = scan(subnet, args.timeout)
+    devices = scan(subnet, args.timeout, log=status)
 
     if not devices:
-        print("No devices found.")
+        status("No devices found.")
         sys.exit(1)
 
-    print(f"\n{'IP Address':<18}{'MAC Address':<20}Hostname")
-    print("-" * 60)
-    for device in devices:
-        print(f"{device['ip']:<18}{device.get('mac') or '-':<20}{device.get('hostname', '')}")
-    print(f"\n{len(devices)} device(s) found.")
+    if args.ips_only:
+        for device in devices:
+            print(device["ip"])
+    elif args.json:
+        print(json.dumps(devices))
+    else:
+        print(f"\n{'IP Address':<18}{'MAC Address':<20}Hostname")
+        print("-" * 60)
+        for device in devices:
+            print(f"{device['ip']:<18}{device.get('mac') or '-':<20}{device.get('hostname', '')}")
+        print(f"\n{len(devices)} device(s) found.")
 
 
 if __name__ == "__main__":
