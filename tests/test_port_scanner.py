@@ -129,5 +129,21 @@ class TestMainKeyboardInterrupt(unittest.TestCase):
         self.assertIn("Stopped", buf.getvalue())
 
 
+class TestExitCodes(unittest.TestCase):
+    def test_exits_nonzero_when_no_open_ports_found(self):
+        import sys
+        with mock.patch.object(sys, "argv", ["port_scanner.py", "127.0.0.1"]), \
+             mock.patch.object(m, "scan_host", return_value=[]):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_does_not_exit_nonzero_when_open_ports_found(self):
+        import sys
+        with mock.patch.object(sys, "argv", ["port_scanner.py", "127.0.0.1"]), \
+             mock.patch.object(m, "scan_host", return_value=[80]):
+            m.main()  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,8 @@ Usage:
     python network_scanner.py                 # auto-detect local subnet
     python network_scanner.py 192.168.1.0/24   # scan a specific subnet
     python network_scanner.py --timeout 2
+
+Exit code is 0 if at least one device was found, 1 if none were.
 """
 
 import argparse
@@ -18,6 +20,7 @@ import platform
 import re
 import socket
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Sane upper bound for a single sequential scan (~a /20). Without this, a
@@ -159,7 +162,7 @@ def main():
 
     if not devices:
         print("No devices found.")
-        return
+        sys.exit(1)
 
     print(f"\n{'IP Address':<18}{'MAC Address':<20}Hostname")
     print("-" * 60)

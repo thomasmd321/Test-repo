@@ -10,11 +10,16 @@ Usage:
     python duplicate_finder.py ~/Downloads
     python duplicate_finder.py ~/Downloads --min-size 1024
     python duplicate_finder.py ~/Downloads --delete   # keep first copy, remove the rest
+
+Exit code is 0 if duplicates were found (and, with --delete, all removed
+successfully), 1 if none were found, 2 if one or more files couldn't be
+deleted.
 """
 
 import argparse
 import hashlib
 import os
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -100,11 +105,13 @@ def main():
     failed_deletes = 0
     total_wasted = 0
     total_dupes = 0
+    exit_code = 0
     try:
         duplicates = find_duplicates(root, args.min_size, on_unreadable_dir=warn_unreadable)
 
         if not duplicates:
             print("No duplicate files found.")
+            exit_code = 1
         else:
             for digest, paths in sorted(duplicates.items(), key=lambda kv: kv[1][0]):
                 try:
@@ -135,12 +142,15 @@ def main():
                 print("Nothing was deleted (pass --delete to remove all but the first copy in each group).")
             elif failed_deletes:
                 print(f"{failed_deletes} file(s) could not be deleted (see [!] lines above).")
+                exit_code = 2
     except KeyboardInterrupt:
         print("\nStopped (partial results above).")
 
     if skipped_dirs:
         noun = "directory" if len(skipped_dirs) == 1 else "directories"
         print(f"\n{len(skipped_dirs)} {noun} could not be read and were skipped.")
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

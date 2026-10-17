@@ -86,8 +86,11 @@ class TestGetLocalSubnet(unittest.TestCase):
 
 class TestMainSubnetGuard(unittest.TestCase):
     def _run_main(self, argv):
+        # A non-empty scan() result keeps these guard-only tests clear of
+        # main()'s "no devices found" -> exit(1) path, which is unrelated
+        # to what's being tested here (see TestExitCodes for that).
         with mock.patch.object(sys, "argv", ["network_scanner.py"] + argv), \
-             mock.patch.object(m, "scan", return_value=[]):
+             mock.patch.object(m, "scan", return_value=[{"ip": "10.0.0.1", "mac": "", "hostname": ""}]):
             m.main()
 
     def test_oversized_subnet_rejected(self):
@@ -113,6 +116,20 @@ class TestMainSubnetGuard(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 m.main()
         self.assertIn("Could not auto-detect", str(ctx.exception))
+
+
+class TestExitCodes(unittest.TestCase):
+    def test_exits_nonzero_when_no_devices_found(self):
+        with mock.patch.object(sys, "argv", ["network_scanner.py", "192.168.1.0/30"]), \
+             mock.patch.object(m, "scan", return_value=[]):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_does_not_exit_nonzero_when_devices_found(self):
+        with mock.patch.object(sys, "argv", ["network_scanner.py", "192.168.1.0/30"]), \
+             mock.patch.object(m, "scan", return_value=[{"ip": "192.168.1.1", "mac": "", "hostname": ""}]):
+            m.main()  # must not raise
 
 
 if __name__ == "__main__":

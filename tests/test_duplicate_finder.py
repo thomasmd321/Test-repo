@@ -101,7 +101,9 @@ class TestDeleteBehavior(DuplicateFinderTestCase):
         self.write("unique.txt", "something else")
 
         with mock.patch.object(sys, "argv", ["duplicate_finder.py", str(self.root), "--delete"]):
-            m.main()
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertEqual(ctx.exception.code, 0)
 
         remaining = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*.txt"))
         self.assertIn("a.txt", remaining)
@@ -114,7 +116,9 @@ class TestDeleteBehavior(DuplicateFinderTestCase):
         self.write("b.txt", "hello world")
 
         with mock.patch.object(sys, "argv", ["duplicate_finder.py", str(self.root)]):
-            m.main()
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertEqual(ctx.exception.code, 0)
 
         remaining = sorted(p.name for p in self.root.glob("*.txt"))
         self.assertEqual(remaining, ["a.txt", "b.txt"])  # nothing removed
@@ -166,7 +170,8 @@ class TestUnreadableDirectory(DuplicateFinderTestCase):
              mock.patch.object(m.os, "walk", side_effect=fake_walk):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                m.main()
+                with self.assertRaises(SystemExit):
+                    m.main()  # a.txt alone has no duplicate -> exit(1), not a crash
 
         self.assertIn("could not be read and were skipped", buf.getvalue())
 
@@ -188,7 +193,9 @@ class TestDeleteFailureIsReportedNotFatal(DuplicateFinderTestCase):
 
         with mock.patch.object(sys, "argv", ["duplicate_finder.py", str(self.root), "--delete"]), \
              mock.patch.object(Path, "unlink", flaky_unlink):
-            m.main()  # must not raise despite b.txt's unlink failing
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()  # must not crash/traceback despite b.txt's unlink failing
+        self.assertEqual(ctx.exception.code, 2)  # a failed delete is a real error
 
         remaining = {p.name for p in self.root.glob("*.txt")}
         # a.txt kept as the designated original; b.txt's delete failed so it
@@ -209,9 +216,28 @@ class TestMainKeyboardInterrupt(DuplicateFinderTestCase):
              mock.patch.object(m, "find_duplicates", side_effect=KeyboardInterrupt):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                m.main()  # must not raise/traceback
+                with self.assertRaises(SystemExit) as ctx:
+                    m.main()  # must not traceback
 
         self.assertIn("Stopped", buf.getvalue())
+        self.assertEqual(ctx.exception.code, 0)
+
+
+class TestExitCodes(DuplicateFinderTestCase):
+    def test_exits_nonzero_when_no_duplicates_found(self):
+        self.write("only_one.txt", "nothing else has this content")
+        with mock.patch.object(sys, "argv", ["duplicate_finder.py", str(self.root)]):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_exits_zero_when_duplicates_found_and_reported(self):
+        self.write("a.txt", "hello world")
+        self.write("b.txt", "hello world")
+        with mock.patch.object(sys, "argv", ["duplicate_finder.py", str(self.root)]):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertEqual(ctx.exception.code, 0)
 
 
 if __name__ == "__main__":

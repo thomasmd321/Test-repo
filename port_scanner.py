@@ -12,10 +12,13 @@ Usage:
     python port_scanner.py 192.168.1.50 --ports 1-1024
     python port_scanner.py 192.168.1.50 --ports 22,80,443
     python port_scanner.py 192.168.1.50 --ports 1-65535 --timeout 0.3
+
+Exit code is 0 if at least one open port was found, 1 if none were.
 """
 
 import argparse
 import socket
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # A short, well-known list covering the services most likely to be
@@ -108,7 +111,7 @@ def main():
 
     if not open_ports:
         print("No open ports found.")
-        return
+        sys.exit(1)
 
     print(f"\n{'Port':<8}Service")
     print("-" * 30)
