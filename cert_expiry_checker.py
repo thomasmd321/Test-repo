@@ -10,6 +10,7 @@ Usage:
     python cert_expiry_checker.py example.com:8443 mail.example.com
     python cert_expiry_checker.py --warn-days 14 example.com
     python cert_expiry_checker.py --file hosts.txt
+    python cert_expiry_checker.py --json example.com mail.example.com
 
 Exit code is 0 if every certificate is healthy, 1 if any are expiring
 within --warn-days, 2 if any are already expired or unreachable.
@@ -17,6 +18,7 @@ within --warn-days, 2 if any are already expired or unreachable.
 
 import argparse
 import datetime
+import json
 import socket
 import ssl
 import sys
@@ -93,6 +95,7 @@ def main():
     parser.add_argument("--file", help="Read additional hosts from a file, one per line (# comments allowed)")
     parser.add_argument("--warn-days", type=int, default=30, help="Flag certificates expiring within this many days (default: 30)")
     parser.add_argument("--timeout", type=float, default=5.0, help="Seconds to wait per connection (default: 5)")
+    parser.add_argument("--json", action="store_true", help="Print results as a JSON array instead of a table")
     args = parser.parse_args()
 
     hosts = list(args.hosts)
@@ -104,8 +107,10 @@ def main():
         raise SystemExit("No hosts given. Pass one or more hosts, or --file.")
 
     exit_code = 0
-    print(f"{'Host':<32}{'Port':<8}{'Days Left':<12}Status")
-    print("-" * 72)
+    results = []
+    if not args.json:
+        print(f"{'Host':<32}{'Port':<8}{'Days Left':<12}Status")
+        print("-" * 72)
     try:
         for spec in hosts:
             try:
@@ -115,15 +120,30 @@ def main():
                 # abort checking every other host in the list/--file --
                 # report it the same way a connection failure would.
                 exit_code = max(exit_code, 2)
-                print(f"{spec:<32}{'?':<8}{'?':<12}ERROR: invalid host:port ({exc})")
+                status = f"ERROR: invalid host:port ({exc})"
+                if args.json:
+                    results.append({"host": spec, "port": None, "days_left": None, "status": status})
+                else:
+                    print(f"{spec:<32}{'?':<8}{'?':<12}{status}")
                 continue
             days_left, error = check_host(host, port, args.timeout)
             status, contribution = classify(days_left, error, args.warn_days)
             exit_code = max(exit_code, contribution)
-            days_text = "?" if days_left is None else str(days_left)
-            print(f"{host:<32}{port:<8}{days_text:<12}{status}")
+            if args.json:
+                results.append({"host": host, "port": port, "days_left": days_left, "status": status})
+            else:
+                days_text = "?" if days_left is None else str(days_left)
+                print(f"{host:<32}{port:<8}{days_text:<12}{status}")
     except KeyboardInterrupt:
-        print("\nStopped.")
+        # A bare "Stopped." on stdout would corrupt --json's output, which
+        # is meant to be piped straight into something that parses it.
+        if args.json:
+            print("Stopped.", file=sys.stderr)
+        else:
+            print("\nStopped.")
+
+    if args.json:
+        print(json.dumps(results))
 
     sys.exit(exit_code)
 

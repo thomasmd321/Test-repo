@@ -9,6 +9,7 @@ and status classification. Skipped automatically if `openssl` isn't
 available in the environment running the tests.
 """
 import datetime
+import json
 import shutil
 import socket
 import ssl
@@ -225,6 +226,66 @@ class TestMainBatchHandling(unittest.TestCase):
         self.assertIn("Stopped.", output)
         self.assertIn("host1", output)
         self.assertNotIn("host3", output)  # never reached
+        self.assertEqual(exit_code, 0)
+
+
+class TestJsonOutputMode(unittest.TestCase):
+    def _run_main_json(self, argv, expiry_days_left=100, check_host_side_effect=None):
+        import contextlib
+        import io
+
+        fixed_expiry = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=expiry_days_left)
+        patches = [mock.patch.object(sys, "argv", ["cert_expiry_checker.py"] + argv)]
+        if check_host_side_effect is not None:
+            patches.append(mock.patch.object(m, "check_host", side_effect=check_host_side_effect))
+        else:
+            patches.append(mock.patch.object(m, "get_certificate_expiry", return_value=fixed_expiry))
+
+        with patches[0], patches[1]:
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    m.main()
+                except SystemExit as exc:
+                    return out.getvalue(), err.getvalue(), exc.code
+        raise AssertionError("main() should always call sys.exit()")
+
+    def test_json_mode_prints_a_valid_json_array_with_expected_fields(self):
+        out, _err, exit_code = self._run_main_json(["--json", "healthy.example"], expiry_days_left=100)
+        results = json.loads(out)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["host"], "healthy.example")
+        self.assertEqual(results[0]["port"], 443)
+        self.assertGreaterEqual(results[0]["days_left"], 99)  # .days truncates; allow for clock drift
+        self.assertEqual(results[0]["status"], "ok")
+        self.assertEqual(exit_code, 0)
+
+    def test_json_mode_represents_a_malformed_spec_as_a_null_port_entry(self):
+        out, _err, exit_code = self._run_main_json(["--json", "bad:"], expiry_days_left=100)
+        results = json.loads(out)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["host"], "bad:")
+        self.assertIsNone(results[0]["port"])
+        self.assertIsNone(results[0]["days_left"])
+        self.assertIn("ERROR", results[0]["status"])
+        self.assertEqual(exit_code, 2)
+
+    def test_json_mode_table_header_is_not_printed(self):
+        out, _err, _code = self._run_main_json(["--json", "healthy.example"], expiry_days_left=100)
+        self.assertNotIn("Days Left", out)
+
+    def test_json_mode_keyboard_interrupt_mid_batch_gives_partial_json_not_corrupted_output(self):
+        def raise_on_second_host(host, port, timeout):
+            if host == "host2":
+                raise KeyboardInterrupt
+            return 100, None
+
+        out, err, exit_code = self._run_main_json(
+            ["--json", "host1", "host2", "host3"], check_host_side_effect=raise_on_second_host,
+        )
+        results = json.loads(out)  # must still be valid, parseable JSON
+        self.assertEqual([r["host"] for r in results], ["host1"])
+        self.assertIn("Stopped", err)  # the stop notice must not land in stdout
         self.assertEqual(exit_code, 0)
 
 
