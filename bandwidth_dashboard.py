@@ -82,6 +82,17 @@ except ImportError:
     HAVE_RICH = False
 
 
+# Realistic home-LAN device counts are small and stable, but
+# Stats.hostnames had no cap at all -- one entry per unique IP ever seen
+# in the live table's top-20, for the life of the process. Bounded the
+# same way other long-running state elsewhere in this repo is (see
+# arp_spoof_detector.py's FlapDetector pruning): once the cache would
+# grow past this, it's cleared and rebuilt from scratch rather than
+# growing forever on a dashboard left running for days on a busier or
+# more open network.
+MAX_CACHED_HOSTNAMES = 2048
+
+
 class Stats:
     """Thread-safe accumulator of bytes sent/received per IP address."""
 
@@ -103,6 +114,8 @@ class Stats:
     def hostname_for(self, ip: str) -> str:
         with self.lock:
             if ip not in self.hostnames:
+                if len(self.hostnames) >= MAX_CACHED_HOSTNAMES:
+                    self.hostnames.clear()
                 try:
                     self.hostnames[ip] = socket.gethostbyaddr(ip)[0]
                 except (socket.herror, socket.gaierror):
@@ -367,8 +380,19 @@ def run_netgear_source(args):
 
     def poll():
         time.sleep(args.interval)
-        devices = router.get_attached_devices_2() or []
-        traffic_meter = router.get_traffic_meter() or {}
+        try:
+            devices = router.get_attached_devices_2() or []
+            traffic_meter = router.get_traffic_meter() or {}
+        except Exception as exc:
+            # Mirrors the sniff/conntrack sources' own "the source died
+            # mid-session" handling: a router reboot, a dropped WiFi link,
+            # or a timed-out SOAP call after a successful initial login
+            # would otherwise crash with a raw traceback here instead of
+            # a friendly message.
+            raise SystemExit(
+                f"Lost contact with {args.netgear_host}: {exc}\n"
+                "(The router may have rebooted or dropped off the network.)"
+            )
         return devices, traffic_meter
 
     return poll

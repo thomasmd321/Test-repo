@@ -133,6 +133,16 @@ class TestStats(unittest.TestCase):
             self.assertEqual(stats.hostname_for("192.168.1.1"), "")
         self.assertIn("192.168.1.1", stats.hostnames)  # cached
 
+    def test_hostname_cache_stays_bounded_under_many_distinct_ips(self):
+        """Reproduces the original finding directly: Stats.hostnames had
+        no cap at all and grew one entry per unique IP ever seen, for the
+        life of the process."""
+        stats = m.Stats()
+        with mock.patch.object(m.socket, "gethostbyaddr", side_effect=m.socket.herror):
+            for i in range(m.MAX_CACHED_HOSTNAMES + 500):
+                stats.hostname_for(f"10.{i // 65536}.{(i // 256) % 256}.{i % 256}")
+        self.assertLessEqual(len(stats.hostnames), m.MAX_CACHED_HOSTNAMES)
+
 
 class TestReadConntrack(unittest.TestCase):
     def test_local_command(self):
@@ -210,6 +220,43 @@ class TestRunConntrackSource(unittest.TestCase):
                 poll()
         self.assertIn("Permission denied", str(ctx.exception))
         self.assertIn("nf_conntrack_acct", str(ctx.exception))
+
+
+class TestRunNetgearSource(unittest.TestCase):
+    class FakeArgs:
+        netgear_user = "admin"
+        netgear_host = "routerlogin.net"
+        interval = 0
+
+    def _poll_with_fake_router(self, router):
+        with mock.patch.object(m, "Netgear", return_value=router), \
+             mock.patch.dict(m.os.environ, {"NETGEAR_PASSWORD": "x"}):
+            return m.run_netgear_source(self.FakeArgs())
+
+    def test_mid_session_router_failure_surfaces_as_friendly_system_exit(self):
+        """The bug this guards against: poll() had no exception handling
+        at all, unlike the sniff/conntrack sources (fixed for this exact
+        failure mode in the very first hardening pass) -- a router
+        reboot or dropped link after a successful login crashed with a
+        raw traceback instead."""
+        router = mock.Mock()
+        router.login.return_value = True
+        router.get_attached_devices_2.side_effect = ConnectionError("router unreachable")
+        poll = self._poll_with_fake_router(router)
+        with self.assertRaises(SystemExit) as ctx:
+            poll()
+        self.assertIn("Lost contact", str(ctx.exception))
+        self.assertIn("router unreachable", str(ctx.exception))
+
+    def test_successful_poll_returns_devices_and_traffic_meter(self):
+        router = mock.Mock()
+        router.login.return_value = True
+        router.get_attached_devices_2.return_value = ["device"]
+        router.get_traffic_meter.return_value = {"NewTodayUpload": 1.0}
+        poll = self._poll_with_fake_router(router)
+        devices, traffic_meter = poll()
+        self.assertEqual(devices, ["device"])
+        self.assertEqual(traffic_meter, {"NewTodayUpload": 1.0})
 
 
 class TestNetgearTable(unittest.TestCase):
