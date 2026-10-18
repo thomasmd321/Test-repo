@@ -182,6 +182,32 @@ class TestUploadEnabled(LiveServerTestCase):
         # the private temp file must be cleaned up too, not left as debris
         self.assertEqual(list(self.served_dir.glob(".upload-*")), [])
 
+    def test_abrupt_rst_disconnect_mid_upload_is_quiet_not_a_traceback(self):
+        """A clean close (the test above) just returns an empty read --
+        a real dropped connection (crashed client, WiFi drop) raises
+        ConnectionResetError from rfile.read() instead, which must be
+        handled the same way, not printed as a traceback to stderr."""
+        import contextlib
+        import io
+        import socket as socket_module
+        import struct
+
+        s = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+        s.connect(("127.0.0.1", self.port))
+        s.send(b"POST /upload?name=rst.txt HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n")
+        s.send(b"only part of the body")
+        # SO_LINGER (1, 0): close() sends a real RST instead of a clean FIN
+        s.setsockopt(socket_module.SOL_SOCKET, socket_module.SO_LINGER, struct.pack("ii", 1, 0))
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            s.close()
+            time.sleep(0.3)
+
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertFalse((self.served_dir / "rst.txt").exists())
+        self.assertEqual(list(self.served_dir.glob(".upload-*")), [])
+
     def test_concurrent_uploads_of_same_filename_never_corrupt(self):
         """The core fix: two simultaneous uploads to the same filename must
         never interleave/corrupt, and the file on disk must always be

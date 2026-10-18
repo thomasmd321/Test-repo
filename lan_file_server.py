@@ -130,7 +130,18 @@ class ShareHandler(http.server.SimpleHTTPRequestHandler):
             with os.fdopen(tmp_fd, "wb") as f:
                 remaining = length
                 while remaining > 0:
-                    chunk = self.rfile.read(min(65536, remaining))
+                    try:
+                        chunk = self.rfile.read(min(65536, remaining))
+                    except (ConnectionResetError, BrokenPipeError, socket.timeout):
+                        # An abrupt disconnect (a dropped connection, a
+                        # client that crashed) raises here instead of
+                        # just returning an empty/short read -- treat it
+                        # the same as a clean early EOF rather than
+                        # letting it propagate uncaught, which would
+                        # print a traceback to stderr despite this
+                        # handler's whole point being to stay quiet about
+                        # a client that's gone.
+                        break
                     if not chunk:
                         break  # client disconnected before sending everything
                     f.write(chunk)
