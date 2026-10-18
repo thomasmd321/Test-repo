@@ -176,6 +176,14 @@ class TestRealTlsHandshake(unittest.TestCase):
         self.assertEqual(expiry, self.expected_expiry)
 
 
+class TestFileFlag(unittest.TestCase):
+    def test_missing_file_gives_friendly_error_not_a_traceback(self):
+        with mock.patch.object(sys, "argv", ["cert_expiry_checker.py", "--file", "/does/not/exist.txt"]):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertIn("Could not read", str(ctx.exception))
+
+
 class TestMainBatchHandling(unittest.TestCase):
     """main()'s per-host loop, exercised through its real argv/stdout
     surface rather than by calling check_host()/classify() directly."""

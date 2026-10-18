@@ -100,8 +100,11 @@ def main():
 
     hosts = list(args.hosts)
     if args.file:
-        with open(args.file) as f:
-            hosts += [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        try:
+            with open(args.file) as f:
+                hosts += [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        except OSError as exc:
+            raise SystemExit(f"Could not read {args.file}: {exc}")
 
     if not hosts:
         raise SystemExit("No hosts given. Pass one or more hosts, or --file.")
