@@ -22,6 +22,7 @@ import ipaddress
 import json
 import platform
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -67,13 +68,23 @@ def arp_scan(subnet: str, timeout: float):
 
 
 def ping(ip: str, timeout: float) -> bool:
-    """Return True if the host responds to a single ping."""
+    """Return True if the host responds to a single ping.
+
+    The ping command's own -W/-w flag should bound how long this takes,
+    but that's enforcement by a separate process we don't control -- the
+    explicit subprocess timeout= below is a hard backstop in case that
+    flag is ignored or misbehaves on some platform/ping variant, so one
+    unresponsive host can't stall this call indefinitely.
+    """
     count_flag = "-n" if platform.system().lower() == "windows" else "-c"
     timeout_ms = str(int(timeout * 1000))
     timeout_flag = ["-w", timeout_ms] if platform.system().lower() == "windows" else ["-W", str(max(1, int(timeout)))]
 
     command = ["ping", count_flag, "1", *timeout_flag, ip]
-    result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=max(timeout, 1) + 2)
+    except subprocess.TimeoutExpired:
+        return False
     return result.returncode == 0
 
 
@@ -99,6 +110,18 @@ def read_arp_table() -> dict:
 
 def ping_sweep(subnet: str, timeout: float, max_workers: int = 100):
     """Discover devices by pinging every host in the subnet, then reading the ARP cache."""
+    if shutil.which("ping") is None:
+        # Checked once upfront rather than letting ping() raise
+        # FileNotFoundError per host: that would mean up to --max-hosts
+        # failed subprocess attempts (one per host in the subnet) before
+        # the problem became visible, instead of one clear message.
+        # read_arp_table() already degrades gracefully when `arp` is
+        # missing (it's optional MAC enrichment); a missing `ping`
+        # binary is different -- it's this scan method's actual
+        # detection mechanism, so failing fast here instead of quietly
+        # reporting "no devices found" is the honest answer.
+        raise RuntimeError("the 'ping' command is not available on this system")
+
     network = ipaddress.ip_network(subnet, strict=False)
     hosts = list(network.hosts())
 
@@ -180,6 +203,8 @@ def main():
     except KeyboardInterrupt:
         status("\nStopped.")
         return
+    except RuntimeError as exc:
+        raise SystemExit(str(exc))
 
     if not devices:
         status("No devices found.")

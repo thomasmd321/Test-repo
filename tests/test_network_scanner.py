@@ -41,7 +41,8 @@ class TestPingSweep(unittest.TestCase):
         def fake_ping(ip, timeout):
             return ip.endswith(".2") or ip.endswith(".4")
 
-        with mock.patch.object(m, "ping", side_effect=fake_ping), \
+        with mock.patch.object(m.shutil, "which", return_value="/usr/bin/ping"), \
+             mock.patch.object(m, "ping", side_effect=fake_ping), \
              mock.patch.object(m, "read_arp_table", return_value={}):
             devices = m.ping_sweep("192.168.1.0/29", timeout=0.01)
 
@@ -50,13 +51,31 @@ class TestPingSweep(unittest.TestCase):
         self.assertTrue(all(ip.endswith(".2") or ip.endswith(".4") for ip in ips))
 
     def test_arp_table_and_hostname_are_attached(self):
-        with mock.patch.object(m, "ping", return_value=True), \
+        with mock.patch.object(m.shutil, "which", return_value="/usr/bin/ping"), \
+             mock.patch.object(m, "ping", return_value=True), \
              mock.patch.object(m, "read_arp_table", return_value={"192.168.1.1": "aa:bb:cc:11:22:33"}), \
              mock.patch.object(m.socket, "gethostbyaddr", side_effect=m.socket.herror):
             devices = m.ping_sweep("192.168.1.0/30", timeout=0.01)
         by_ip = {d["ip"]: d for d in devices}
         self.assertEqual(by_ip["192.168.1.1"]["mac"], "aa:bb:cc:11:22:33")
         self.assertEqual(by_ip["192.168.1.1"]["hostname"], "")  # herror -> ""
+
+    def test_missing_ping_binary_raises_a_clear_runtime_error_not_a_crash(self):
+        """The bug this guards against: ping() used to raise a raw
+        FileNotFoundError from inside a worker thread, uncaught, once
+        per host. Checked upfront instead, with one clear message."""
+        with mock.patch.object(m.shutil, "which", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                m.ping_sweep("192.168.1.0/30", timeout=0.01)
+        self.assertIn("ping", str(ctx.exception))
+
+    def test_ping_subprocess_timeout_counts_as_not_responding(self):
+        """A hard backstop: if the ping command itself hangs past its
+        own -W/-w flag (ignored, or an unusual ping variant), the
+        subprocess-level timeout= must still bound it instead of
+        stalling that host's slot in the thread pool indefinitely."""
+        with mock.patch.object(m.subprocess, "run", side_effect=m.subprocess.TimeoutExpired(cmd="ping", timeout=1)):
+            self.assertFalse(m.ping("192.168.1.1", timeout=0.5))
 
 
 class TestScanFallback(unittest.TestCase):
@@ -193,6 +212,13 @@ class TestMainKeyboardInterrupt(unittest.TestCase):
                 m.main()  # must not raise/traceback
 
         self.assertIn("Stopped", buf.getvalue())
+
+    def test_missing_ping_binary_gives_friendly_error_not_a_traceback(self):
+        with mock.patch.object(sys, "argv", ["network_scanner.py", "192.168.1.0/30"]), \
+             mock.patch.object(m, "scan", side_effect=RuntimeError("the 'ping' command is not available on this system")):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertIn("ping", str(ctx.exception))
 
 
 if __name__ == "__main__":
