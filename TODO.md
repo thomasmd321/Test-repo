@@ -227,7 +227,7 @@ finished request threads are never retained); GET-path traversal in
 (`safe_upload_name()` correctly strips `.`/`..`/directory components on
 both POSIX and Windows separators).
 
-## Bugs found by a third review pass (not yet fixed)
+## Bugs found by a third review pass (all fixed)
 
 A full re-read of all 8 scripts, prompted by "review all code, add findings
 to the to-do list" -- not a subagent pass this time, done directly. Covers
@@ -235,12 +235,13 @@ to the to-do list" -- not a subagent pass this time, done directly. Covers
 since the very first hardening pass, plus a fresh adversarial look at the
 six scripts fixed earlier this round (on the theory that a round of fixes
 is exactly where a fresh bug is most likely to have been introduced or
-missed). Every item below was verified by a live reproduction, not just
-read and assumed -- noted per item. None of these are fixed yet.
+missed). Every item below was verified by a live reproduction before being
+fixed, not just read and assumed -- and the fix itself was re-verified the
+same way.
 
 **Medium severity:**
 
-- [ ] `lan_file_server.py`: an abrupt client disconnect during upload
+- [x] `lan_file_server.py`: an abrupt client disconnect during upload
       (a TCP RST, not just a clean close -- a WiFi drop, a crashed
       client, a client closing with `SO_LINGER` set to 0) raises
       `ConnectionResetError` from `self.rfile.read()` inside `do_POST()`.
@@ -253,8 +254,12 @@ read and assumed -- noted per item. None of these are fixed yet.
       a raw socket forcing a real RST (`SO_LINGER` 1/0) mid-upload. Not a
       correctness bug -- the temp-file cleanup in the `finally` block
       still runs correctly either way (verified: no leaked temp file, no
-      corrupted real file) -- purely unwanted stderr noise.
-- [ ] `network_scanner.py`: `ping()` (used by the ping-sweep fallback)
+      corrupted real file) -- purely unwanted stderr noise. **Fixed:**
+      the read loop now catches `(ConnectionResetError, BrokenPipeError,
+      socket.timeout)` around `self.rfile.read()` and treats it like a
+      clean early EOF; re-verified with the same real RST reproduction
+      -- no traceback, no leaked temp file, no partial real file.
+- [x] `network_scanner.py`: `ping()` (used by the ping-sweep fallback)
       has no guard for a missing `ping` binary, unlike `read_arp_table()`
       in the same file, which already catches `FileNotFoundError` for
       the identical situation with the `arp` binary. On a system with no
@@ -267,8 +272,14 @@ read and assumed -- noted per item. None of these are fixed yet.
       also passes no `timeout=` to its own `subprocess.run()` call --
       it relies entirely on the `ping` command's own `-W`/`-w` flag to
       bound runtime, with no hard backstop if that flag is ignored or
-      misbehaves on some platform/ping variant.
-- [ ] `bandwidth_dashboard.py`: `run_netgear_source()`'s `poll()` closure
+      misbehaves on some platform/ping variant. **Fixed:** `ping_sweep()`
+      now checks `shutil.which("ping")` once upfront and raises a clear
+      `RuntimeError` (turned into a friendly `SystemExit` by `main()`)
+      instead of letting `FileNotFoundError` surface per-host from deep
+      in the thread pool; `ping()`'s own `subprocess.run()` now also
+      passes `timeout=` as the hard backstop, treating a timeout the
+      same as a non-responsive host. Re-verified both paths live.
+- [x] `bandwidth_dashboard.py`: `run_netgear_source()`'s `poll()` closure
       (`router.get_attached_devices_2()` / `router.get_traffic_meter()`)
       has no exception handling. If the router becomes unreachable
       mid-session (reboot, WiFi drop, a timed-out SOAP call) after a
@@ -277,27 +288,35 @@ read and assumed -- noted per item. None of these are fixed yet.
       very first hardening pass explicitly fixed this exact "source dies
       mid-session" failure mode with a friendly `SystemExit`. The netgear
       source was added/reviewed separately and never got the same
-      treatment.
+      treatment. **Fixed:** `poll()` now wraps both router calls in
+      `try/except Exception`, raising the same kind of friendly
+      `SystemExit` ("Lost contact with ...") the other two sources
+      already give; re-verified with a mocked router raising
+      mid-session.
 
 **Low severity:**
 
-- [ ] `cert_expiry_checker.py`: `--file` is opened with a bare
+- [x] `cert_expiry_checker.py`: `--file` is opened with a bare
       `open(args.file)`, with no `try/except` around it -- a missing or
       unreadable file crashes with a raw `FileNotFoundError` traceback
       instead of the friendly `SystemExit` every other file-touching
       operation in this repo gives for the same kind of mistake (compare
       `duplicate_finder.py`'s directory check, `lan_file_server.py`'s
       bind-error handling). Reproduced live: `--file
-      /does/not/exist.txt` dumps a traceback.
-- [ ] `port_scanner.py`: `--timeout` isn't validated the way `--workers`
+      /does/not/exist.txt` dumps a traceback. **Fixed:** wrapped in
+      `try/except OSError`, giving a friendly `SystemExit`; re-verified
+      with the same missing-file case.
+- [x] `port_scanner.py`: `--timeout` isn't validated the way `--workers`
       now is (this session's own fix, in this same file) -- a negative
       value (e.g. `--timeout -1`) crashes with a raw
       `ValueError: Timeout value out of range` from inside a worker
       thread. `scan_host()`'s `except OSError: continue` doesn't catch
       it (`ValueError` isn't an `OSError`), so it propagates uncaught.
       Same bug class as the `--workers` fix, just missed for the
-      sibling flag. Reproduced live.
-- [ ] `bandwidth_dashboard.py`: `Stats.hostnames` grows one entry per
+      sibling flag. Reproduced live. **Fixed:** `main()` now validates
+      `--timeout >= 0` the same way it already validates `--workers`;
+      re-verified with the same negative-timeout case.
+- [x] `bandwidth_dashboard.py`: `Stats.hostnames` grows one entry per
       unique IP ever seen in the live table's top-20 ranked list, for
       the life of the process, with no pruning -- the same unbounded-
       growth shape already found and fixed for `arp_spoof_detector.py`'s
@@ -307,22 +326,21 @@ read and assumed -- noted per item. None of these are fixed yet.
       set, so growth is slow in the realistic case -- but for a dashboard
       left running for days on a busier/more open network, it's the same
       "unbounded growth over an unattended long run" category this repo
-      has treated as worth fixing elsewhere. Not reproduced live (would
-      require simulating a very long run with many distinct top-20 IPs);
-      flagged from reading the code against the same pattern already
-      fixed once in this codebase.
+      has treated as worth fixing elsewhere. **Fixed:** capped at
+      `MAX_CACHED_HOSTNAMES` (2048); once reached, the cache clears and
+      rebuilds rather than growing forever -- re-verified with a test
+      feeding 2500+ distinct IPs through `hostname_for()`.
 
-**Doc/comment nits** (trivial, no behavior change, listed so they don't
-get lost):
+**Doc/comment nits:**
 
-- [ ] `requirements.txt`'s comment for `scapy` reads "network_scanner.py
+- [x] `requirements.txt`'s comment for `scapy` read "network_scanner.py
       (--source-free ARP scan)" -- garbled; `network_scanner.py` has no
       `--source` flag at all (that's `bandwidth_dashboard.py`'s flag).
-- [ ] README.md and TODO.md's `tests/` entries both still say "171
-      tests"; the actual count is 172 as of this session's last fix
-      (network_scanner.py's `KeyboardInterrupt` handling added one test
-      after those docs were last updated) -- and will need updating
-      again once the items above are fixed and tested.
+      **Fixed.**
+- [x] README.md and TODO.md's `tests/` entries said "171 tests"; stale
+      once `network_scanner.py`'s `KeyboardInterrupt` handling added a
+      test after those docs were last updated. **Fixed:** both now say
+      181 (172 + the 9 tests added fixing the items above).
 
 ## Possible improvements
 

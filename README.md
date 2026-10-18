@@ -358,7 +358,7 @@ pip install -r requirements.txt   # optional: unlocks the scapy-dependent tests 
 ```
 
 Runs the full suite in `tests/` (one file per tool, plus a shared smoke
-test, 171 tests total). Almost everything is a real integration test
+test, 181 tests total). Almost everything is a real integration test
 rather than a mock — a real TCP listener for `port_scanner.py`, a real
 self-signed TLS handshake (via the system `openssl` CLI) for
 `cert_expiry_checker.py`, a real HTTP server for `lan_file_server.py`
