@@ -63,7 +63,8 @@ into another command only ever sees the actual data. Exit code is 0 if at
 least one device was found, 1 if none were.
 
 Optional dependency: `scapy` (for the faster ARP scan; falls back to
-`ping`/`arp` otherwise).
+`ping`/`arp` otherwise). If neither `scapy` nor the `ping` command is
+available at all, this gives a friendly error instead of crashing.
 
 ## bandwidth_dashboard.py
 
@@ -151,6 +152,10 @@ either the vendor's cloud subscription (e.g. Netgear Armor/Insight) or a
 hardware change — a separate Linux box bridged between the router and your
 switch, or a router that supports OpenWrt/DD-WRT.
 
+If the router becomes unreachable mid-session (a reboot, a dropped WiFi
+link) after a successful initial login, this exits with a friendly message
+instead of a raw traceback.
+
 ### Common options
 
 | Flag | Applies to | Description |
@@ -226,7 +231,7 @@ python3 port_scanner.py 192.168.1.50 --ports 1-65535 --timeout 0.3
 | Flag | Description |
 | --- | --- |
 | `--ports SPEC` | Comma list and/or ranges, e.g. `22,80,443` or `1-1024` (default: ~25 common ports) |
-| `--timeout SECONDS` | Wait per port (default: 0.5) |
+| `--timeout SECONDS` | Wait per port, must not be negative (default: 0.5) |
 | `--workers N` | Concurrent connection attempts, must be at least 1 (default: 200) |
 
 Exit code is 0 if at least one open port was found, 1 if none were.
@@ -283,7 +288,8 @@ python3 cert_expiry_checker.py --json example.com mail.example.com
 
 Accepts bracketed IPv6 literals too (`[::1]`, `[::1]:8443`). A malformed
 host:port spec, or a single host that's unreachable, is reported as an
-error for that entry without aborting the rest of the batch.
+error for that entry without aborting the rest of the batch. A missing or
+unreadable `--file` gives a friendly error instead of a traceback.
 
 No dependencies beyond the standard library.
 
