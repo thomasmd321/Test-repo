@@ -46,6 +46,20 @@ python3 network_scanner.py --ips-only | xargs -n1 port_scanner.py
 python3 network_scanner.py --json
 ```
 
+Example output:
+
+```
+Scanning 192.168.1.0/24 ...
+
+IP Address        MAC Address         Hostname
+------------------------------------------------------------
+192.168.1.1       aa:bb:cc:11:22:33   router.lan
+192.168.1.42      de:ad:be:ef:12:34   kitchen-echo
+192.168.1.87      -                   
+
+3 device(s) found.
+```
+
 Refuses to scan a subnet larger than `--max-hosts` addresses (default 4096)
 as a safety net against typos like `/8` instead of `/24`, which would
 otherwise try to sweep millions of hosts at once.
@@ -81,6 +95,17 @@ Passively sniffs traffic on a local network interface with scapy.
 sudo python3 bandwidth_dashboard.py                  # auto-pick interface
 sudo python3 bandwidth_dashboard.py --interface eth0
 sudo python3 bandwidth_dashboard.py --interval 5
+```
+
+Example output (the live `rich` table looks nicer; this is the plain-text
+fallback when `rich` isn't installed, which every source shares):
+
+```
+Bandwidth by device (last 2s)
+----------------------------------------------------------------
+IP              Upload      Download    Hostname
+192.168.1.20    585.9 KB/s  4.0 MB/s    laptop.lan
+192.168.1.42    22.0 KB/s   58.6 KB/s   
 ```
 
 **Caveat:** on a typical switched network, an ordinary host only sees its
@@ -197,6 +222,13 @@ sudo python3 arp_spoof_detector.py --flap-window 10 --pin 192.168.1.1=aa:bb:cc:1
 python3 arp_spoof_detector.py --repair 192.168.1.1=aa:bb:cc:11:22:33
 ```
 
+Example output when it catches something:
+
+```
+Watching ARP replies on eth0 ... Ctrl+C to stop.
+[!] FLAP: 192.168.1.1 changed from aa:bb:cc:11:22:33 to de:ad:be:ef:99:99 after 3.2s
+```
+
 `--repair` dispatches to the OS's own static-ARP command (`arp -s` on
 Linux/macOS, `netsh` on Windows — see `--windows-interface` for the adapter
 name Windows needs) so the corrected mapping can't be silently overwritten
@@ -228,6 +260,19 @@ python3 port_scanner.py 192.168.1.50 --ports 22,80,443
 python3 port_scanner.py 192.168.1.50 --ports 1-65535 --timeout 0.3
 ```
 
+Example output:
+
+```
+Scanning 192.168.1.50 (3 ports) ...
+
+Port    Service
+------------------------------
+22      ssh
+80      http
+
+2 open port(s) found.
+```
+
 | Flag | Description |
 | --- | --- |
 | `--ports SPEC` | Comma list and/or ranges, e.g. `22,80,443` or `1-1024` (default: ~25 common ports) |
@@ -249,6 +294,19 @@ nothing is deleted unless you pass `--delete`.
 python3 duplicate_finder.py ~/Downloads
 python3 duplicate_finder.py ~/Downloads --min-size 1024
 python3 duplicate_finder.py ~/Downloads --delete   # keep first copy, remove the rest
+```
+
+Example output:
+
+```
+Scanning /home/alex/Downloads ...
+
+2 copies (19 bytes each, 19 bytes wasted):
+  [KEEP] /home/alex/Downloads/photos/vacation-copy.jpg
+  [DUPE] /home/alex/Downloads/vacation.jpg
+
+1 duplicate file(s) in 1 group(s), 19 bytes wasted.
+Nothing was deleted (pass --delete to remove all but the first copy in each group).
 ```
 
 | Flag | Description |
@@ -279,6 +337,15 @@ python3 cert_expiry_checker.py --file hosts.txt
 python3 cert_expiry_checker.py --json example.com mail.example.com
 ```
 
+Example output:
+
+```
+Host                            Port    Days Left   Status
+------------------------------------------------------------------------
+example.com                     443     364         ok
+mail.example.com                443     9           EXPIRING SOON
+```
+
 | Flag | Description |
 | --- | --- |
 | `--file PATH` | Read additional hosts from a file, one per line (`#` comments allowed) |
@@ -305,6 +372,13 @@ python3 log_watcher.py /var/log/syslog --pattern "error|failed"
 python3 log_watcher.py app.log --pattern "ERROR" --pattern "WARN:.*timeout"
 python3 log_watcher.py app.log --pattern "ERROR" --from-start
 python3 log_watcher.py app.log --pattern "ERROR" --interval 0.5
+```
+
+Example output:
+
+```
+Watching app.log for 1 pattern(s) ... Ctrl+C to stop.
+[!] 2026-10-18 10:00:02 ERROR database connection failed
 ```
 
 | Flag | Description |
@@ -335,6 +409,24 @@ python3 lan_file_server.py                      # serve the current directory, p
 python3 lan_file_server.py ~/Public --port 9000
 python3 lan_file_server.py --allow-upload
 python3 lan_file_server.py --bind 127.0.0.1      # local machine only, not the LAN
+```
+
+Example output at startup:
+
+```
+Serving /home/alex/Public
+  On this machine:  http://127.0.0.1:9000/
+  On your LAN:      http://192.168.1.50:9000/
+  Upload form:      http://192.168.1.50:9000/upload-form
+
+Anyone who can reach this address on your network can browse these files.
+Ctrl+C to stop.
+```
+
+...and for an upload (`curl -X POST --data-binary "meeting notes" "http://127.0.0.1:9000/upload?name=notes.txt"`):
+
+```
+Uploaded notes.txt (13 bytes)
 ```
 
 | Flag | Description |
