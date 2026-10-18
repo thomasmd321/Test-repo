@@ -113,6 +113,16 @@ class TestMainHostResolution(unittest.TestCase):
                 m.main()
         self.assertIn("--workers", str(ctx.exception))
 
+    def test_negative_timeout_gives_friendly_error_not_a_raw_valueerror(self):
+        """socket.settimeout() raises a bare ValueError for a negative
+        value; main() must catch this itself before it ever reaches
+        there (the same bug class already fixed for --workers)."""
+        import sys
+        with mock.patch.object(sys, "argv", ["port_scanner.py", "127.0.0.1", "--timeout", "-1"]):
+            with self.assertRaises(SystemExit) as ctx:
+                m.main()
+        self.assertIn("--timeout", str(ctx.exception))
+
 
 class TestMainKeyboardInterrupt(unittest.TestCase):
     def test_keyboard_interrupt_mid_scan_stops_cleanly_not_a_traceback(self):

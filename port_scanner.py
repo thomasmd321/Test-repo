@@ -92,6 +92,9 @@ def main():
     if args.workers < 1:
         raise SystemExit(f"--workers must be at least 1 (got {args.workers})")
 
+    if args.timeout < 0:
+        raise SystemExit(f"--timeout must not be negative (got {args.timeout})")
+
     try:
         ports = parse_ports(args.ports) if args.ports else list(COMMON_PORTS)
     except ValueError as exc:
